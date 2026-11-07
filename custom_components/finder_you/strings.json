@@ -16,5 +16,16 @@
     "abort": {
       "already_configured": "This account is already configured."
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Finder YOU options",
+        "data": {
+          "stable_cloud_session": "Stable cloud session"
+        },
+        "description": "Keep a single cloud session open: never reconnect before commands and tolerate occasional poll timeouts. Enable it if commands work only right after a gateway restart (e.g. gateway 1Y.GU.005, plants without cloud position telemetry)."
+      }
+    }
   }
 }

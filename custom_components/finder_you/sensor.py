@@ -37,6 +37,7 @@ async def async_setup_entry(
             TelemetryAgeSensor(coordinator),
             LastCommandAgeSensor(coordinator),
             HandshakeAgeSensor(coordinator),
+            ReconnectCountSensor(coordinator),
         ]
     )
 
@@ -118,3 +119,30 @@ class HandshakeAgeSensor(_GatewayDiagnosticSensor):
         if ts is None:
             return None
         return round(time.time() - ts, 1)
+
+
+class ReconnectCountSensor(CoordinatorEntity[FinderYouCoordinator], SensorEntity):
+    """How many times the cloud session has been rebuilt since startup.
+
+    On gateways that stay bound to the first cloud session (e.g. 1Y.GU.005)
+    each reconnection can leave commands silently ignored until the gateway
+    is power-cycled, so an increase here is the signal to look at.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:connection"
+    _attr_name = "Gateway cloud reconnections"
+
+    def __init__(self, coordinator: FinderYouCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_gateway_reconnect_count"
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.reconnect_count
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"stable_session": self.coordinator.stable_session}

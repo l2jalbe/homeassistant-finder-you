@@ -2,6 +2,17 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.1.1] - 2026-11-07
+
+### Aggiunto
+- **Sessione cloud stabile** (opzione in *Finder YOU → Configura*), per impianti il cui cloud non invia telemetria delle tapparelle (es. gateway 1Y.GU.005: `subscribe-plant` risponde `10 01 40 03`, nessun campo posizione #12/#13 in `GetPlant`). Su questi impianti il gateway resta legato alla prima sessione cloud: ogni ri-handshake lasciava i comandi accettati dal cloud ma mai eseguiti fino al riavvio del gateway. Con l'opzione attiva:
+  - nessun rehandshake preventivo e nessun reclaim in-line dopo comandi non verificati;
+  - i timeout occasionali di `GetPlant` non chiudono la sessione (drop solo dopo 3 fallimenti consecutivi o su errore di connessione reale);
+  - polling ogni 120 s invece di 30 s.
+- **Stop via cloud**: senza nodo BLE disponibile, lo stop invia `SetOpenPercent` alla posizione stimata dai tempi di corsa (Ch1T1/Ch1T2); con posizione di partenza ignota durante un'apertura/chiusura completa si assume l'estremo opposto.
+- Sensore diagnostico **Gateway cloud reconnections** (contatore delle ricostruzioni della sessione cloud).
+- Traduzione italiana (`translations/it.json`) e test `tests/test_stable_session.py`.
+
 ## [Unreleased]
 
 ### Aggiunto

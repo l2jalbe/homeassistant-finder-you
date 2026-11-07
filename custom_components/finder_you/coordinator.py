@@ -38,6 +38,8 @@ from .api import (
 
 from .const import (
     CONF_ENABLE_LOCAL_BLE,
+    STABLE_MAX_POLL_FAILURES_BEFORE_DROP,
+    STABLE_SCAN_INTERVAL_SECONDS,
     DEFAULT_ENABLE_LOCAL_BLE,
     DEFAULT_SCAN_INTERVAL_SECONDS,
     DOMAIN,
@@ -52,6 +54,8 @@ from .topology import FinderTopologyRouter
 # one fires. Single user-initiated taps still feel instant because there's
 # nothing queued ahead of them.
 COMMAND_SEND_GAP = 2.0
+# Minimum gap before a cloud "stop" (sent as set-position) after a previous send.
+STOP_MIN_SEND_GAP = 0.3
 # Fast send gap for light/switch RPCs so multi-light commands don't queue behind 2.0s shutter gaps
 LIGHT_COMMAND_SEND_GAP = 0.15
 # How long after a command to wait for the gateway's plant-state cache to
@@ -116,13 +120,24 @@ TOKEN_REFRESH_MARGIN = 300  # seconds
 class FinderYouCoordinator(DataUpdateCoordinator[dict]):
     """Owns the FinderHomeClient lifecycle and produces shutter state for HA."""
 
-    def __init__(self, hass: HomeAssistant, email: str, password: str) -> None:
+    def __init__(
+        self, hass: HomeAssistant, email: str, password: str, stable_session: bool = False
+    ) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}/{email}",
-            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL_SECONDS),
+            update_interval=timedelta(
+                seconds=STABLE_SCAN_INTERVAL_SECONDS if stable_session else DEFAULT_SCAN_INTERVAL_SECONDS
+            ),
         )
+        # Stable cloud session mode (see const.DEFAULT_STABLE_SESSION):
+        # never drop the cloud client proactively; only rebuild it when the
+        # connection is really dead.
+        self._stable_session = stable_session
+        self._reconnect_count: int = 0
+        if stable_session:
+            _LOGGER.info("stable cloud session mode enabled (poll every %ss)", STABLE_SCAN_INTERVAL_SECONDS)
         self._email = email
         self._password = password
         self._client: FinderHomeClient | None = None
@@ -245,6 +260,15 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         return self._last_successful_command_ts
 
     @property
+    def reconnect_count(self) -> int:
+        """Number of cloud session rebuilds since the integration started."""
+        return self._reconnect_count
+
+    @property
+    def stable_session(self) -> bool:
+        return self._stable_session
+
+    @property
     def last_handshake_ts(self) -> float | None:
         """Unix timestamp of the last successful OpenNotificationChannel handshake."""
         return self._last_handshake_ts
@@ -287,6 +311,13 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                 pass
             raise
         self._client = client
+        if self._last_handshake_ts is not None:
+            self._reconnect_count += 1
+            _LOGGER.warning(
+                "cloud session re-established (reconnection #%d)%s",
+                self._reconnect_count,
+                " - if commands stop working, power-cycle the YESLY gateway" if self._stable_session else "",
+            )
         self._last_handshake_ts = time.time()
         return client
 
@@ -310,6 +341,16 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             client = await self._ensure_client()
             return await asyncio.wait_for(fn(client), timeout=15)
         except Exception as err:
+            if (
+                self._stable_session
+                and isinstance(err, (TimeoutError, asyncio.TimeoutError))
+                and self._client is not None
+                and self._consecutive_update_failures + 1 < STABLE_MAX_POLL_FAILURES_BEFORE_DROP
+            ):
+                # Slow cloud answer on a still-open connection: keep the
+                # session (the gateway is bound to it) and let the caller fail.
+                _LOGGER.info("client call timed out; keeping cloud session (stable mode)")
+                raise
             _LOGGER.info("client call failed (%s); reconnecting", err)
             await self._drop_client()
             if self._consecutive_update_failures >= 2:
@@ -327,7 +368,12 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self._consecutive_update_failures = 0
         except (TimeoutError, FinderApiError, ConnectionError, OAuthError, OSError) as err:
             self._consecutive_update_failures += 1
-            await self._drop_client()
+            if (
+                not self._stable_session
+                or self._client is None
+                or self._consecutive_update_failures >= STABLE_MAX_POLL_FAILURES_BEFORE_DROP
+            ):
+                await self._drop_client()
             if self._consecutive_update_failures >= 3:
                 self._token = None
             
@@ -479,6 +525,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         Skipped while another command is already in flight (``_send_lock``
         held) — ripping out the client underneath it would just cascade.
         """
+        if self._stable_session:
+            return False
         if self._send_lock.locked():
             return False
         if (
@@ -550,7 +598,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             except GatewayOfflineError:
                 if seq is not None and self._shutter_cmd_seq.get(shutter_uuid) != seq:
                     return
-                if attempt == MAX_SEND_ATTEMPTS - 1:
+                if attempt == MAX_SEND_ATTEMPTS - 1 or self._stable_session:
                     raise
                 _LOGGER.info(
                     "gateway didn't reflect %s on attempt %d/%d; "
@@ -562,7 +610,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                 await self._drop_client()
                 continue
             if (
-                self._unverified_send_count > pre_count
+                not self._stable_session
+                and self._unverified_send_count > pre_count
                 and not inline_reclaim_used
                 and attempt + 1 < MAX_SEND_ATTEMPTS
             ):
@@ -964,6 +1013,20 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         """Stop shutter movement immediately and release travel guard so actual stopped position updates."""
         now = time.time()
         est_pos = self._estimate_shutter_position_now(shutter_uuid, now)
+        if (
+            est_pos is None
+            and now < self._shutter_guard_until.get(shutter_uuid, 0)
+            and self._pending_ble_shutter_target.get(shutter_uuid) in (0, 100)
+        ):
+            # Start position unknown (e.g. right after an HA restart on a plant
+            # without cloud position telemetry) during a full open/close:
+            # assume the shutter started from the opposite end.
+            target = self._pending_ble_shutter_target[shutter_uuid]
+            start = 100 - target
+            _, travel, _ = self._compute_shutter_travel_guard(shutter_uuid, start, target)
+            elapsed = max(0.0, now - self._shutter_cmd_start_ts.get(shutter_uuid, now) - 0.5)
+            ratio = 1.0 if travel <= 0.1 else min(1.0, elapsed / travel)
+            est_pos = round(start + (target - start) * ratio)
         seq = self._shutter_cmd_seq.get(shutter_uuid, 0) + 1
         self._shutter_cmd_seq[shutter_uuid] = seq
         self._cancel_shutter_active_task(shutter_uuid)
@@ -997,6 +1060,30 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             if dispatched:
                 self._last_successful_command_ts = time.time()
                 return
+
+        # Cloud fallback: the Finder cloud API has no "stop" RPC, so we
+        # stop the shutter by sending it to its estimated current position.
+        if est_pos is None:
+            _LOGGER.warning(
+                "stop requested for %s but its position is unknown; cannot stop via cloud",
+                shutter_uuid,
+            )
+            return
+        assert self._plant_id is not None
+        _LOGGER.info("Cloud stop for %s: sending estimated position %d%%", shutter_uuid, est_pos)
+        async with self._send_lock:
+            # Keep a small gap from the previous send (the gateway drops
+            # commands arriving within ~100 ms of each other) but skip the
+            # full COMMAND_SEND_GAP: every extra second the shutter keeps moving.
+            loop = asyncio.get_event_loop()
+            wait = STOP_MIN_SEND_GAP - (loop.time() - self._last_send_ts)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await self._run_or_reconnect(
+                lambda c: c.set_open_percent(self._plant_id, shutter_uuid.encode(), est_pos)
+            )
+            self._last_send_ts = asyncio.get_event_loop().time()
+        self._last_successful_command_ts = time.time()
 
 
     async def async_activate_scenario(self, scenario_uuid: str) -> None:
