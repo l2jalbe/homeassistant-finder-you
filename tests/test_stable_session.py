@@ -178,3 +178,30 @@ async def test_options_flow(hass):
     )
     assert result["type"] == data_entry_flow.FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_STABLE_SESSION] is True
+
+
+async def test_diagnostic_sensors_share_gateway_device(hass):
+    from custom_components.finder_you.sensor import (
+        HandshakeAgeSensor,
+        LastCommandAgeSensor,
+        ReconnectCountSensor,
+        TelemetryAgeSensor,
+    )
+
+    c = _coord(hass, True)
+    sensors = [
+        TelemetryAgeSensor(c),
+        LastCommandAgeSensor(c),
+        HandshakeAgeSensor(c),
+        ReconnectCountSensor(c),
+    ]
+    ids = {frozenset(s.device_info["identifiers"]) for s in sensors}
+    assert ids == {frozenset({(DOMAIN, "gateway_a@b.c")})}
+    assert sensors[0].device_info["name"] == "Gateway Finder YOU"
+    # unique_ids unchanged -> existing entity_ids are preserved
+    assert [s.unique_id for s in sensors] == [
+        "finder_you_gateway_telemetry_age",
+        "finder_you_gateway_last_command_age",
+        "finder_you_gateway_handshake_age",
+        "finder_you_gateway_reconnect_count",
+    ]

@@ -2,6 +2,11 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.1.2] - 2026-11-07
+
+### Modificato
+- I sensori diagnostici (Telemetry age, Last command age, Handshake age, Cloud reconnections) sono ora raggruppati nel dispositivo **"Gateway Finder YOU"** e compaiono nella pagina dell'integrazione. `unique_id` ed `entity_id` invariati; rimosso il prefisso "Gateway" dai nomi delle entità perché ora è nel nome del dispositivo.
+
 ## [0.1.1] - 2026-11-07
 
 ### Aggiunto

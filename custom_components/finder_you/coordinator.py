@@ -260,6 +260,11 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         return self._last_successful_command_ts
 
     @property
+    def account_id(self) -> str:
+        """Stable per-account identifier (used for the gateway device)."""
+        return self._email.lower()
+
+    @property
     def reconnect_count(self) -> int:
         """Number of cloud session rebuilds since the integration started."""
         return self._reconnect_count

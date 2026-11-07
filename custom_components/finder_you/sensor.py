@@ -19,6 +19,7 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -42,6 +43,16 @@ async def async_setup_entry(
     )
 
 
+def gateway_device_info(coordinator: FinderYouCoordinator) -> DeviceInfo:
+    """Single 'gateway' device grouping the integration's diagnostic sensors."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"gateway_{coordinator.account_id}")},
+        name="Gateway Finder YOU",
+        manufacturer="Finder",
+        model="YESLY gateway (cloud)",
+    )
+
+
 class _GatewayDiagnosticSensor(CoordinatorEntity[FinderYouCoordinator], SensorEntity):
     """Common base — both sensors share the gateway-level identity."""
 
@@ -54,6 +65,7 @@ class _GatewayDiagnosticSensor(CoordinatorEntity[FinderYouCoordinator], SensorEn
     def __init__(self, coordinator: FinderYouCoordinator, suffix: str) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{DOMAIN}_gateway_{suffix}"
+        self._attr_device_info = gateway_device_info(coordinator)
 
 
 class TelemetryAgeSensor(_GatewayDiagnosticSensor):
@@ -65,7 +77,7 @@ class TelemetryAgeSensor(_GatewayDiagnosticSensor):
     wedged — that's the signal we want to catch *before* a scene fails.
     """
 
-    _attr_name = "Gateway telemetry age"
+    _attr_name = "Telemetry age"
 
     def __init__(self, coordinator: FinderYouCoordinator) -> None:
         super().__init__(coordinator, "telemetry_age")
@@ -86,7 +98,7 @@ class LastCommandAgeSensor(_GatewayDiagnosticSensor):
     that may precede a wedge.
     """
 
-    _attr_name = "Gateway last command age"
+    _attr_name = "Last command age"
 
     def __init__(self, coordinator: FinderYouCoordinator) -> None:
         super().__init__(coordinator, "last_command_age")
@@ -108,7 +120,7 @@ class HandshakeAgeSensor(_GatewayDiagnosticSensor):
     correlating "how old is the cloud-side claim?" with wedge incidents.
     """
 
-    _attr_name = "Gateway handshake age"
+    _attr_name = "Handshake age"
 
     def __init__(self, coordinator: FinderYouCoordinator) -> None:
         super().__init__(coordinator, "handshake_age")
@@ -133,11 +145,12 @@ class ReconnectCountSensor(CoordinatorEntity[FinderYouCoordinator], SensorEntity
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_icon = "mdi:connection"
-    _attr_name = "Gateway cloud reconnections"
+    _attr_name = "Cloud reconnections"
 
     def __init__(self, coordinator: FinderYouCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = f"{DOMAIN}_gateway_reconnect_count"
+        self._attr_device_info = gateway_device_info(coordinator)
 
     @property
     def native_value(self) -> int:
