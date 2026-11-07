@@ -2,6 +2,15 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.1.3] - 2026-11-08
+
+### Aggiunto
+- **Stato dalle tapparelle fuori portata tramite la mesh**: i frame di stato rilanciati dalla mesh YESLY (primo byte con bit `0x40`) non sono cifrati e contengono nei byte 0-3 le ultime 4 cifre del MAC del dispositivo di origine. Ora vengono associati alla tapparella d'origine (solo se il MAC risulta nell'inventario dell'impianto) invece di essere scartati: un solo ESP32 riceve lo stato anche delle tapparelle che non sente direttamente. Esempio reale:
+  - diretto `05:61:06:00:F3:EB` → `06 00 F3 EB B1 3D 00 00 42 01 13`
+  - rilancio `05:61:03:20:F2:3E` → `46 00 F3 EB B1 3D 00 00 42 01 13`
+- Deduplicazione tra copia diretta e copia rilanciata dello stesso frame.
+- **Stato "in apertura"/"in chiusura"** delle tapparelle dal byte 6 del frame di stato (`0x01` in salita, `0x10` in discesa, `0x00` ferma), con scadenza automatica dopo il tempo di corsa + 10 s.
+
 ## [0.1.2] - 2026-11-07
 
 ### Modificato

@@ -197,6 +197,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._shutter_ble_confirmed: dict[str, bool] = {}
         self._shutter_guard_timers: dict[str, asyncio.TimerHandle] = {}
         self._shutter_ack_events: dict[str, asyncio.Event] = {}
+        # Live motor state from BLE status frames: uuid -> ("opening"|"closing", ts)
+        self._shutter_motion: dict[str, tuple[str, float]] = {}
         self._shutter_cmd_seq: dict[str, int] = {}
         self._shutter_active_tasks: dict[str, asyncio.Task] = {}
         self._consecutive_update_failures: int = 0
@@ -1680,6 +1682,37 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self.async_set_updated_data(self.data)
 
     @callback
+    def handle_ble_shutter_motion(self, device_uuid: str, motion: str | None) -> None:
+        """Record the live motor state reported by a 13S2 status frame."""
+        prev = self._shutter_motion.get(device_uuid)
+        if motion is None:
+            if prev is None:
+                return
+            self._shutter_motion.pop(device_uuid, None)
+        else:
+            if prev is not None and prev[0] == motion:
+                return
+            self._shutter_motion[device_uuid] = (motion, time.time())
+        _LOGGER.debug("Shutter %s motion -> %s", device_uuid, motion or "stopped")
+        if self.data is not None:
+            self.async_set_updated_data(self.data)
+
+    def shutter_motion(self, device_uuid: str) -> str | None:
+        """Return "opening"/"closing" while the motor runs, else None.
+
+        Expires after the full travel time (+10 s) in case the final
+        "stopped" frame was missed.
+        """
+        entry = self._shutter_motion.get(device_uuid)
+        if entry is None:
+            return None
+        motion, ts = entry
+        up, down = self._shutter_durations.get(device_uuid, (25.0, 25.0))
+        if time.time() - ts > max(up, down) + 10.0:
+            self._shutter_motion.pop(device_uuid, None)
+            return None
+        return motion
+
     def handle_ble_device_state_update(
         self,
         device_uuid: str,

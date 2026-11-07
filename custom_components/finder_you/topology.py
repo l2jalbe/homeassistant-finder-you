@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+# Byte 6 of a 13S2 status frame: motor state.
+# Observed: 0x10 while closing, 0x01 while opening, 0x00 when stopped.
+SHUTTER_MOTION_FLAGS: dict[int, str | None] = {0x00: None, 0x01: "opening", 0x10: "closing"}
+
 # RSSI considered strong enough for direct transmission
 EXCELLENT_RSSI_THRESHOLD = -75
 # Maximum age in seconds before an RSSI observation is considered stale
@@ -331,6 +335,28 @@ class FinderTopologyRouter:
         return None
 
     @callback
+    def _resolve_relay_origin(self, byte_list: list[int]) -> str | None:
+        """Return the MAC of the device a mesh-relayed status frame is about.
+
+        Matches bytes 0-3 (bit 0x40 of byte 0 cleared) against the last four
+        MAC bytes of the plant inventory; returns None when nothing matches,
+        so unknown/encrypted relay frames keep being ignored.
+        """
+        if not self._coordinator or not hasattr(self._coordinator, "ble_inventory"):
+            return None
+        suffix = [byte_list[0] & ~0x40 & 0xFF, byte_list[1], byte_list[2], byte_list[3]]
+        for dev in self._coordinator.ble_inventory.values():
+            parts = dev.mac.upper().replace("-", ":").split(":")
+            if len(parts) != 6:
+                continue
+            try:
+                tail = [int(p, 16) for p in parts[2:]]
+            except ValueError:
+                continue
+            if tail == suffix:
+                return ":".join(parts)
+        return None
+
     def _handle_ble_adv_event(self, event: Event) -> None:
         """Process incoming BLE advertisement observation from an ESPHome node."""
         data = event.data
@@ -384,6 +410,17 @@ class FinderTopologyRouter:
         if byte_list and (byte_list[0] & 0x40) != 0:
             is_mesh_relay = True
 
+        # Mesh-relayed STATUS frames carry the originating device in their
+        # first 4 bytes (= last 4 bytes of its MAC, with bit 0x40 set on the
+        # first one) and the same plaintext payload as the direct frame, e.g.
+        #   direct  05:61:06:00:F3:EB  06 00 F3 EB B1 3D 00 00 42 01 13
+        #   relay   05:61:03:20:F2:3E  46 00 F3 EB B1 3D 00 00 42 01 13
+        # Resolve the origin so a single ESP32 node also receives the state
+        # of shutters it cannot hear directly.
+        relay_origin = None
+        if is_mesh_relay and len(byte_list) >= 11:
+            relay_origin = self._resolve_relay_origin(byte_list)
+
         now = time.time()
         if node:
             node_entry = self._topology.setdefault(mac_clean, {}).setdefault(node, {})
@@ -391,7 +428,7 @@ class FinderTopologyRouter:
             node_entry["last_seen"] = now
             node_entry["is_mesh_relay"] = is_mesh_relay
 
-        if is_mesh_relay:
+        if is_mesh_relay and relay_origin is None:
             _LOGGER.debug(
                 "Ignoring mesh relay frame (0x4x, %d bytes) from repeater %s via '%s'",
                 len(byte_list),
@@ -399,6 +436,22 @@ class FinderTopologyRouter:
                 source_label,
             )
             return
+
+        repeater_mac = None
+        if relay_origin is not None:
+            repeater_mac = mac_clean
+            mac_clean = relay_origin
+            if node:
+                self._topology.setdefault(mac_clean, {}).setdefault(node, {})[
+                    "last_relay_seen"
+                ] = now
+            _LOGGER.debug(
+                "Mesh relay status frame for %s via repeater %s seen by '%s' (RSSI %d)",
+                mac_clean,
+                repeater_mac,
+                source_label,
+                rssi,
+            )
 
         _LOGGER.debug(
             "BLE Topology updated: MAC %s seen by '%s' (RSSI: %d dBm)",
@@ -430,11 +483,13 @@ class FinderTopologyRouter:
                     )
                     return
 
-                if node:
+                if node and repeater_mac is None:
                     self._topology.setdefault(mac_clean, {}).setdefault(node, {})["last_telemetry"] = now
 
-                # Deduplicate identical raw frame within 200ms across dual listeners
-                payload_key = tuple(byte_list[:10])
+                # Deduplicate identical frames within 200ms across dual listeners
+                # and across direct/relayed copies (byte 0 differs by the 0x40
+                # relay flag, so it is excluded from the key).
+                payload_key = tuple(byte_list[1:10])
                 prev_dec = self._last_decoded_adv.get(mac_clean)
                 if prev_dec is not None and prev_dec[0] == payload_key and (now - prev_dec[1]) < 0.2:
                     return
@@ -442,6 +497,7 @@ class FinderTopologyRouter:
 
                 channel_states: dict[int, bool] = {}
                 percent_val: int | None = None
+                motion_val: str | None = None
                 fam = (matched_dev.family or "").upper()
                 is_dimmer = any(k in fam for k in ["1521", "1571"])
                 is_shutter = any(k in fam for k in ["13S2", "SHUTTER"])
@@ -456,11 +512,16 @@ class FinderTopologyRouter:
                         raw_pos = byte_list[5]
                         if 0 <= raw_pos <= 100:
                             percent_val = raw_pos
+                    if len(byte_list) > 6:
+                        motion_val = SHUTTER_MOTION_FLAGS.get(byte_list[6])
                 else:
                     status_byte: int | None = byte_list[6] if len(byte_list) >= 7 else None
                     if status_byte is not None:
                         channel_states[1] = bool(status_byte & 0x01)
                         channel_states[2] = bool(status_byte & 0x10)
+
+                if is_shutter and len(byte_list) > 6:
+                    self._coordinator.handle_ble_shutter_motion(matched_dev.uuid, motion_val)
 
                 if channel_states or percent_val is not None:
                     self._coordinator.handle_ble_device_state_update(

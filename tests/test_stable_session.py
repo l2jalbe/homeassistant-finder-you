@@ -205,3 +205,90 @@ async def test_diagnostic_sensors_share_gateway_device(hass):
         "finder_you_gateway_handshake_age",
         "finder_you_gateway_reconnect_count",
     ]
+
+
+# --- Mesh relay status frames (real captures, 2026-11-07, shutter 05:61:06:00:F3:EB) ---
+
+def _hx(s: str) -> list[int]:
+    return [int(p, 16) for p in s.split()]
+
+
+DIRECT = "05:61:06:00:F3:EB"
+REPEATER = "05:61:03:20:F2:3E"
+F_CLOSING = "06 00 F3 EB B1 64 10 00 41 EA 13"
+F_STOP61 = "06 00 F3 EB B1 3D 00 00 42 01 13"
+F_OPENING = "06 00 F3 EB B1 3D 01 00 42 12 13"
+F_STOP100 = "06 00 F3 EB B1 64 00 00 42 37 13"
+
+
+def _relay(frame: str) -> list[int]:
+    b = _hx(frame)
+    b[0] |= 0x40
+    return b
+
+
+def _router_with_shutter(hass):
+    from custom_components.finder_you.api.plant import BleDirectDevice
+    from custom_components.finder_you.topology import FinderTopologyRouter
+
+    c = _coord(hass, True)
+    c._ble_inventory = {
+        UUID: BleDirectDevice(uuid=UUID, mac=DIRECT, family="13S2", key="00" * 16),
+        "other": BleDirectDevice(uuid="other", mac=REPEATER, family="1YP2", key="00" * 16),
+    }
+    c.data = {UUID: 100}
+    r = FinderTopologyRouter(hass, coordinator=c)
+    return c, r
+
+
+async def test_relay_frame_resolves_origin_and_updates_position(hass):
+    c, r = _router_with_shutter(hass)
+    # Only the RELAYED copy arrives (shutter out of direct range of the ESP32)
+    r._process_finder_adv_bytes(REPEATER, -87, _relay(F_STOP61), "finder_ble_1", "finder_ble_1")
+    assert c.data[UUID] == 61
+    assert c.shutter_motion(UUID) is None
+
+
+async def test_relay_and_direct_copies_are_deduplicated(hass):
+    c, r = _router_with_shutter(hass)
+    calls = []
+    orig = c.handle_ble_device_state_update
+    c.handle_ble_device_state_update = lambda *a, **k: (calls.append(k), orig(*a, **k))
+    r._process_finder_adv_bytes(DIRECT, -69, _hx(F_STOP61), "n", "n")
+    r._process_finder_adv_bytes(REPEATER, -87, _relay(F_STOP61), "n", "n")
+    assert len(calls) == 1
+    assert c.data[UUID] == 61
+
+
+async def test_motion_flags_from_relay(hass):
+    c, r = _router_with_shutter(hass)
+    r._process_finder_adv_bytes(REPEATER, -79, _relay(F_CLOSING), "n", "n")
+    assert c.shutter_motion(UUID) == "closing"
+    r._process_finder_adv_bytes(REPEATER, -87, _relay(F_STOP61), "n", "n")
+    assert c.shutter_motion(UUID) is None
+    r._process_finder_adv_bytes(REPEATER, -81, _relay(F_OPENING), "n", "n")
+    assert c.shutter_motion(UUID) == "opening"
+    r._process_finder_adv_bytes(REPEATER, -88, _relay(F_STOP100), "n", "n")
+    assert c.shutter_motion(UUID) is None
+    assert c.data[UUID] == 100
+
+
+async def test_unknown_relay_origin_still_ignored(hass):
+    c, r = _router_with_shutter(hass)
+    unknown = _relay("01 02 03 04 B1 10 00 00 42 01 13")
+    r._process_finder_adv_bytes(REPEATER, -80, unknown, "n", "n")
+    assert c.data[UUID] == 100
+
+
+async def test_relayed_command_frame_ignored(hass):
+    c, r = _router_with_shutter(hass)
+    # 9-byte relayed frame (command) for the same origin -> not telemetry
+    r._process_finder_adv_bytes(REPEATER, -80, _relay("06 00 F3 EB 05 AA BB CC DD"), "n", "n")
+    assert c.data[UUID] == 100
+
+
+async def test_motion_expires(hass):
+    c, _ = _router_with_shutter(hass)
+    c._shutter_durations[UUID] = (20.0, 20.0)
+    c._shutter_motion[UUID] = ("closing", time.time() - 31)
+    assert c.shutter_motion(UUID) is None

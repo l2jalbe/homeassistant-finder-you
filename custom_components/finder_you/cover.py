@@ -96,6 +96,14 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
         return super().available
 
     @property
+    def is_opening(self) -> bool | None:
+        return self.coordinator.shutter_motion(self._shutter.uuid) == "opening"
+
+    @property
+    def is_closing(self) -> bool | None:
+        return self.coordinator.shutter_motion(self._shutter.uuid) == "closing"
+
+    @property
     def is_closed(self) -> bool | None:
         pos = self.current_cover_position
         if pos is None:
