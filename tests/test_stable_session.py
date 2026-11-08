@@ -386,3 +386,210 @@ async def test_no_author_specific_rules_left(hass):
     src = open(topology.__file__).read()
     for token in ("bluetooth_proxy_sara", "esphome_web_cef3a0", "18264c", "NODE_ADJACENCY_MAP", "SOURCE_MAC_TO_NODE_MAP", "_get_affinity_node"):
         assert token not in src
+
+
+# --- Group supervisor (strada B) - based on real captures 2026-11-08 ---------
+
+from datetime import timedelta  # noqa: E402
+from unittest.mock import patch as _patch  # noqa: E402
+
+from homeassistant.util import dt as dt_util  # noqa: E402
+from pytest_homeassistant_custom_component.common import async_fire_time_changed  # noqa: E402
+
+from custom_components.finder_you.api.plant import Shutter  # noqa: E402
+
+SALA_DX = "72a6279a-3ea3-418e-90d0-e821374c3fae"
+SALA_SX = "1bd5ec9e-90d2-4d8d-abb3-498aedcefffc"
+INGRESSO = "7c491637-4a7a-45f1-8528-33c4f550e373"
+CMD_OPEN = "45 0B 00 00 09 59 1E A1 C7 E2 15 00 00 8A 17"   # seq 5, code 09 (apri)
+CMD_CLOSE = "49 0B 00 00 11 83 60 AC 54 E2 15 00 00 8A 17"  # seq 9, code 11 (chiudi)
+
+
+def _cmd(frame: str, seq: int) -> list[int]:
+    b = _hx(frame)
+    b[0] = 0x40 | seq
+    return b
+
+
+def _shutter(uuid, name):
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(Shutter)}
+    kw = {"uuid": uuid, "name": name}
+    for f in fields - kw.keys():
+        kw[f] = None
+    return Shutter(**kw)
+
+
+def _sup_coord(hass, tmp_path):
+    c = _coord(hass, True)
+    c._shutters = [_shutter(SALA_DX, "Sala finestra dx"), _shutter(SALA_SX, "Sala finestra sx"),
+                   _shutter(INGRESSO, "Portafinestra ingresso")]
+    c.data = {SALA_DX: 100, SALA_SX: 100, INGRESSO: 100}
+    c.routing_map = CustomRoutingMap(str(tmp_path / "m.yaml"))
+    c.async_set_position = AsyncMock()
+    return c, c.group_supervisor
+
+
+async def _press(hass, sup, frame, seq, movers, direction):
+    # real presses are seconds apart: forget motion from the previous press
+    sup._motion_start = {u: (ts - 60, d) for u, (ts, d) in sup._motion_start.items()}
+    sup._motion_now = {}
+    sup.handle_command_frame(_cmd(frame, seq))
+    sup.handle_command_frame(_cmd(frame, seq))  # duplicate copy from 2nd gateway
+    t0 = sup._active["0B0000"].ts
+    for u in movers:
+        sup._motion_start[u] = (t0 + 1.0, direction)
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=4))
+    await hass.async_block_till_done()
+
+
+async def _teach(hass, sup):
+    seq = 1
+    for _ in range(2):
+        await _press(hass, sup, CMD_CLOSE, seq, [SALA_DX, SALA_SX, INGRESSO], "close"); seq += 1
+        await _press(hass, sup, CMD_OPEN, seq, [SALA_DX, SALA_SX, INGRESSO], "open"); seq += 1
+    return seq
+
+
+async def test_group_learning_from_motion(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    await _teach(hass, sup)
+    assert sup.is_known("0B0000")
+    assert set(sup.members("0B0000")) == {SALA_DX, SALA_SX, INGRESSO}
+    assert sup.code_direction("0B0000", 0x09) == "open"
+    assert sup.code_direction("0B0000", 0x11) == "close"
+    c.async_set_position.assert_not_called()
+    s = sup.summary()["0B0000"]
+    assert s["membri"] == ["Portafinestra ingresso", "Sala finestra dx", "Sala finestra sx"]
+    assert s["codici"] == {"09": "apri", "11": "chiudi"}
+
+
+async def test_group_correction_of_missing_member(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    seq = await _teach(hass, sup)
+    c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0}
+    # the real case: 'apri' at mid-course, Sala finestra sx does not react
+    await _press(hass, sup, CMD_OPEN, seq, [SALA_DX, INGRESSO], "open")
+    c.async_set_position.assert_awaited_once_with(SALA_SX, 100)
+    assert sup.corrections_total == 1
+
+
+async def test_no_correction_when_nobody_moved(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    seq = await _teach(hass, sup)
+    c.data = {SALA_DX: 100, SALA_SX: 100, INGRESSO: 100}
+    await _press(hass, sup, CMD_OPEN, seq, [], "open")  # 'apri' with all already open
+    c.async_set_position.assert_not_called()
+
+
+async def test_no_correction_when_already_at_target(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    seq = await _teach(hass, sup)
+    c.data = {SALA_DX: 0, SALA_SX: 100, INGRESSO: 0}
+    await _press(hass, sup, CMD_OPEN, seq, [SALA_DX, INGRESSO], "open")
+    c.async_set_position.assert_not_called()
+
+
+async def test_unknown_code_never_corrected(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    seq = await _teach(hass, sup)
+    c.data = {SALA_DX: 50, SALA_SX: 50, INGRESSO: 50}
+    unknown = CMD_OPEN.replace(" 09 ", " 08 ", 1)
+    await _press(hass, sup, unknown, seq, [SALA_DX, INGRESSO], "open")
+    c.async_set_position.assert_not_called()
+
+
+async def test_superseded_command_not_corrected(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    seq = await _teach(hass, sup)
+    c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0}
+    sup._motion_start = {}
+    sup.handle_command_frame(_cmd(CMD_OPEN, seq))
+    t0 = sup._active["0B0000"].ts
+    sup._motion_start[SALA_DX] = (t0 + 0.8, "open")
+    sup.handle_command_frame(_cmd(CMD_CLOSE, seq + 1))  # user presses again before 2.5 s
+    sup._motion_start[SALA_DX] = (t0 + 1.2, "close")
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=4))
+    await hass.async_block_till_done()
+    calls = [a.args for a in c.async_set_position.await_args_list]
+    assert (SALA_SX, 100) not in calls  # the superseded 'apri' is never applied
+
+
+async def test_correction_disabled_or_excluded_in_map(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    seq = await _teach(hass, sup)
+    c.routing_map._group_raw = {"0B0000": {"correzione": "no"}}
+    c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0}
+    await _press(hass, sup, CMD_OPEN, seq, [SALA_DX, INGRESSO], "open")
+    c.async_set_position.assert_not_called()
+    c.routing_map._group_raw = {"0B0000": {"correzione": "si", "esclusi": ["Sala finestra sx"]}}
+    c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0}
+    await _press(hass, sup, CMD_OPEN, seq + 1, [SALA_DX, INGRESSO], "open")
+    c.async_set_position.assert_not_called()
+
+
+async def test_ha_commanded_shutter_not_learned_nor_corrected(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    sup.note_ha_command(SALA_SX)
+    await _press(hass, sup, CMD_CLOSE, 1, [SALA_DX, SALA_SX], "close")
+    assert SALA_SX not in sup._groups["0B0000"]["members"]
+
+
+def test_routing_map_groups_section_roundtrip(tmp_path):
+    p = tmp_path / "m.yaml"
+    m = CustomRoutingMap(str(p))
+    groups = {"0B0000": {"membri": ["Sala finestra dx", "Sala finestra sx"], "codici": {"09": "apri", "11": "chiudi"}, "osservazioni": 4}}
+    m.sync(SHUTTERS, ["finder_ble_1"], groups)
+    text = p.read_text()
+    assert 'gruppi:' in text and '"0B0000":' in text and 'correzione: si' in text
+    assert 'codici: {"09": apri, "11": chiudi}' in text
+    text = text.replace('nome: ""', 'nome: "Pulsante sala"').replace("correzione: si", "correzione: no")
+    p.write_text(text)
+    import os, time as _t
+    os.utime(p, (_t.time() + 5, _t.time() + 5))
+    m.sync(SHUTTERS, ["finder_ble_1"], groups)
+    st = m.group_settings("0B0000")
+    assert st["enabled"] is False and st["name"] == "Pulsante sala"
+    groups["0B0000"]["osservazioni"] = 5   # learning progresses -> file rewritten, user values kept
+    m.sync(SHUTTERS, ["finder_ble_1"], groups)
+    text = p.read_text()
+    assert 'nome: "Pulsante sala"' in text and "correzione: no" in text and "osservazioni: 5" in text
+
+
+async def test_topology_forwards_command_frames(hass, tmp_path):
+    c, r = _router_with_shutter(hass)
+    c.group_supervisor.handle_command_frame = MagicMock()
+    r._process_finder_adv_bytes(REPEATER, -90, _cmd(CMD_OPEN, 5), "n", "n")
+    c.group_supervisor.handle_command_frame.assert_called_once()
+
+
+async def test_member_still_moving_old_way_is_corrected(hass, tmp_path):
+    """Real case: Sala sx was closing, missed 'apri' and kept closing."""
+    c, sup = _sup_coord(hass, tmp_path)
+    seq = await _teach(hass, sup)
+    c.data = {SALA_DX: 60, SALA_SX: 60, INGRESSO: 60}
+    sup._motion_start = {}
+    sup._motion_now = {SALA_DX: "close", SALA_SX: "close", INGRESSO: "close"}
+    sup.handle_command_frame(_cmd(CMD_OPEN, seq))
+    # status frames after the command: two reverse, Sala sx keeps reporting "closing"
+    sup.note_motion(SALA_DX, "opening")
+    sup.note_motion(INGRESSO, "opening")
+    sup.note_motion(SALA_SX, "closing")
+    t0 = sup._active["0B0000"].ts
+    for u in (SALA_DX, INGRESSO):
+        sup._motion_start[u] = (t0 + 1.0, "open")
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=4))
+    await hass.async_block_till_done()
+    c.async_set_position.assert_awaited_once_with(SALA_SX, 100)
+
+
+def test_note_motion_records_only_starts(hass):
+    from custom_components.finder_you.group_supervisor import GroupSupervisor
+    sup = GroupSupervisor(hass, MagicMock())
+    sup.note_motion("u", "closing")
+    t1 = sup._motion_start["u"][0]
+    sup.note_motion("u", "closing")
+    assert sup._motion_start["u"][0] == t1
+    sup.note_motion("u", None)
+    sup.note_motion("u", "closing")
+    assert sup._motion_start["u"][0] >= t1

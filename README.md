@@ -14,7 +14,7 @@ Il fork nasce per far funzionare l'integrazione su un impianto con
 **gateway 1Y.GU.005** e per rendere la parte ESP32 utilizzabile su qualsiasi
 casa, non solo su quella dell'autore originale.
 
-> Versione attuale: **0.1.5** — dettagli in [CHANGELOG.md](CHANGELOG.md).
+> Versione attuale: **0.2.0** — dettagli in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -70,6 +70,11 @@ Novità di questo fork:
   generata da sola con tutte le tapparelle a `auto`; scrivendo il nome di un
   ESP32 al posto di `auto` quell'ESP32 viene provato per primo. Dettagli in
   [ROUTING.md](ROUTING.md).
+- **Recupero dei comandi di gruppo**: quando un pulsante fisico o uno scenario
+  comanda più tapparelle e una non risponde, HA se ne accorge e le manda il
+  comando singolarmente. I gruppi vengono imparati da soli osservando quali
+  tapparelle si muovono; si gestiscono nella sezione `gruppi:` della mappa
+  personalizzata. Dettagli in [ROUTING.md](ROUTING.md).
 - Icona dell'integrazione (Home Assistant 2026.3+).
 
 ---
@@ -102,6 +107,9 @@ gestisce un solo client attivo alla volta.
   advertising Finder come evento `esphome.finder_ble_adv`.
 - Nel dispositivo ESPHome in HA attiva **"Allow the device to perform Home
   Assistant actions"**, altrimenti gli stati non arrivano.
+- L'inoltro degli advertising deve essere senza limiti per MAC (i gateway
+  rilanciano frame di molte tapparelle con lo stesso MAC): vedi
+  `finder_relay.h` nella documentazione del nodo.
 - Un ESP32 in posizione centrale può bastare grazie alla mesh; altri ESP32
   migliorano i comandi verso le tapparelle più isolate (vedi [ROUTING.md](ROUTING.md)).
 

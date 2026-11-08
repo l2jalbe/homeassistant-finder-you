@@ -77,6 +77,42 @@ tapparelle:
   lista e far restituire a `preferred_node()` il primo online; in
   `select_alternate_node()` usare il secondo.
 
+## Recupero dei comandi di gruppo (pulsanti e scenari) — `group_supervisor.py`
+
+I pulsanti fisici e gli scenari YESLY comandano più tapparelle con **un solo
+frame cifrato da 15 byte**:
+
+```
+45 0B 00 00  09  59 1E A1 C7  E2 15 00 00 8A 17
+|  gruppo    cmd  firma        mittente
++- bit 0x40 = rilanciato, 6 bit bassi = progressivo della pressione
+```
+
+Non si può decifrare, ma l'effetto è visibile nei frame di stato (byte del
+motore). Il supervisore:
+
+1. **Impara** (per ogni gruppo = byte 1-3) quali tapparelle *avviano* il motore
+   nei 3,5 s successivi e in che direzione, e associa ogni codice comando
+   (byte 4) ad "apri"/"chiudi". Un gruppo è noto dopo 2 osservazioni con
+   movimento; una tapparella è membro se si è mossa almeno 2 volte e in almeno
+   metà delle osservazioni; un codice è affidabile dopo 2 osservazioni coerenti
+   (≥ 80%). Dati salvati in `.storage/finder_you_groups`.
+2. **Recupera**: a un nuovo comando di un gruppo noto con codice noto, dopo
+   2,5 s ogni membro che non ha avviato il motore *nella direzione giusta* riceve
+   il comando singolo (`async_set_position`: BLE locale, poi cloud).
+
+Regole di sicurezza: mai per codici sconosciuti; mai se nessun membro si è mosso
+nella direzione attesa; mai se la tapparella è già al bersaglio (±2%); una sola
+correzione per comando; annullato se arriva un nuovo comando dello stesso gruppo;
+le tapparelle comandate da HA negli stessi secondi sono ignorate (né apprese né
+corrette). Solo gli *avvii* del motore contano: una tapparella che continua a
+muoversi nella vecchia direzione dopo aver perso il comando viene corretta.
+
+Impostazioni per gruppo nella sezione `gruppi:` della mappa personalizzata
+(`nome`, `correzione: si/no`, `esclusi: [...]`); `membri`, `codici` e
+`osservazioni` sono informativi e aggiornati da soli. Il sensore diagnostico
+**Group corrections** conta i recuperi e mostra i gruppi appresi negli attributi.
+
 ## Regole dell'autore originale (rimosse)
 
 Il fork di francescodoffizi conteneva regole scritte per la sua casa:
@@ -98,4 +134,5 @@ rilancio 05:61:03:20:F2:3E   46 00 F3 EB  B1  3D  00  00 42 01 13
 - byte 0-3: ultime 4 parti del MAC di origine; nel rilancio il byte 0 ha il bit `0x40`
 - byte 5: posizione 0-100 (100 = aperta)
 - byte 6: motore `0x01` in salita, `0x10` in discesa, `0x00` fermo
-- frame di 9 byte = comandi (contatore + comando + MIC AES-CCM), non stato
+- frame di 9 byte = comandi singoli (contatore + comando + MIC AES-CCM), non stato
+- frame di 15 byte = comandi di gruppo da pulsanti/scenari (vedi sopra)

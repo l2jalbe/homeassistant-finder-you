@@ -39,6 +39,7 @@ async def async_setup_entry(
             LastCommandAgeSensor(coordinator),
             HandshakeAgeSensor(coordinator),
             ReconnectCountSensor(coordinator),
+            GroupCorrectionsSensor(coordinator),
         ]
     )
 
@@ -159,3 +160,26 @@ class ReconnectCountSensor(CoordinatorEntity[FinderYouCoordinator], SensorEntity
     @property
     def extra_state_attributes(self) -> dict:
         return {"stable_session": self.coordinator.stable_session}
+
+
+class GroupCorrectionsSensor(CoordinatorEntity[FinderYouCoordinator], SensorEntity):
+    """Shutters recovered after missing a button/scenario group command."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.TOTAL_INCREASING
+    _attr_icon = "mdi:auto-fix"
+    _attr_name = "Group corrections"
+
+    def __init__(self, coordinator: FinderYouCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{DOMAIN}_gateway_group_corrections"
+        self._attr_device_info = gateway_device_info(coordinator)
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.group_supervisor.corrections_total
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"gruppi": self.coordinator.group_supervisor.summary()}

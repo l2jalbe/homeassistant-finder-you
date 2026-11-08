@@ -2,6 +2,13 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.2.0] - 2026-11-08
+
+### Aggiunto
+- **Recupero dei comandi di gruppo** (`group_supervisor.py`): i frame comando da 15 byte di pulsanti e scenari vengono riconosciuti (gruppo = byte 1-3, codice = byte 4). L'integrazione impara da sola quali tapparelle avviano il motore dopo ogni comando di gruppo e in che direzione; ai comandi successivi, le tapparelle del gruppo che dopo 2,5 s non si sono mosse nella direzione attesa (e non sono già al bersaglio) ricevono il comando singolo via BLE/cloud. Regole di sicurezza: niente per codici sconosciuti, niente se nessun membro si è mosso, una correzione per comando, annullata da un comando più recente.
+- Sezione `gruppi:` nella mappa personalizzata: `nome`, `correzione: si/no`, `esclusi`, più membri/codici/osservazioni appresi.
+- Sensore diagnostico **Group corrections** (dispositivo Gateway Finder YOU), con i gruppi appresi negli attributi.
+
 ## [0.1.5] - 2026-11-08
 
 ### Aggiunto

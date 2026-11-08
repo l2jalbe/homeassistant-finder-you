@@ -331,6 +331,12 @@ class FinderTopologyRouter:
         source_label: str = "unknown",
     ) -> None:
         """Common topology and state telemetry processor for Finder YESLY BLE advertisements."""
+        # 15-byte frames are button/scenario group commands (encrypted):
+        # hand them to the group supervisor (learning + recovery).
+        if len(byte_list) == 15 and self._coordinator is not None:
+            supervisor = getattr(self._coordinator, "group_supervisor", None)
+            if supervisor is not None:
+                supervisor.handle_command_frame(byte_list)
         is_mesh_relay = False
         if byte_list and (byte_list[0] & 0x40) != 0:
             is_mesh_relay = True

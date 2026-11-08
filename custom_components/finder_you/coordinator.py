@@ -44,6 +44,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL_SECONDS,
     DOMAIN,
 )
+from .group_supervisor import GroupSupervisor
 from .routing_map import FILE_NAME as ROUTING_MAP_FILE, CustomRoutingMap
 from .topology import FinderTopologyRouter
 
@@ -206,6 +207,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._topology_router = FinderTopologyRouter(hass, coordinator=self)
         # User-editable "first ESP32 to try" per shutter (see ROUTING.md)
         self.routing_map = CustomRoutingMap(hass.config.path(ROUTING_MAP_FILE))
+        # Learns button/scenario groups and recovers shutters that miss them
+        self.group_supervisor = GroupSupervisor(hass, self)
         self._topology_router.start()
 
     def is_channel_syncing(self, device_uuid: str, channel: int) -> bool:
@@ -432,6 +435,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                     self.routing_map.sync,
                     [(sh.name, sh.uuid) for sh in self._shutters],
                     list(self._topology_router.esphome_nodes),
+                    self.group_supervisor.summary(),
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Routing map sync failed: %s", err)
@@ -864,6 +868,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
 
     async def async_set_position(self, shutter_uuid: str, percent: int) -> None:
         """Set shutter position (0-100%) with Local-First BLE routing, ack verification, and cloud fallback."""
+        self.group_supervisor.note_ha_command(shutter_uuid)
         seq = self._shutter_cmd_seq.get(shutter_uuid, 0) + 1
         self._shutter_cmd_seq[shutter_uuid] = seq
         self._cancel_shutter_active_task(shutter_uuid)
@@ -1712,6 +1717,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
 
     def handle_ble_shutter_motion(self, device_uuid: str, motion: str | None) -> None:
         """Record the live motor state reported by a 13S2 status frame."""
+        self.group_supervisor.note_motion(device_uuid, motion)
         prev = self._shutter_motion.get(device_uuid)
         if motion is None:
             if prev is None:
@@ -1972,6 +1978,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             handle.cancel()
         self._shutter_guard_timers.clear()
         self._topology_router.stop()
+        self.group_supervisor.async_stop()
         if self._client:
             await self._client.close()
             self._client = None

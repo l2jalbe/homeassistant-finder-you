@@ -30,6 +30,8 @@ _LOGGER = logging.getLogger(__name__)
 FILE_NAME = "finder_you_mappa_personalizzata.yaml"
 AUTO = "auto"
 SECTION = "tapparelle"
+GROUPS_SECTION = "gruppi"
+_TRUE = {"true", "on", "si", "sì", "yes", "attiva", "1"}
 
 _HEADER = """\
 # =============================================================================
@@ -61,6 +63,17 @@ _HEADER = """\
 #   ricaricando l'integrazione (Finder YOU > tre puntini > Ricarica).
 #   Non serve riavviare Home Assistant.
 #
+# GRUPPI (pulsanti e scenari che comandano piu' tapparelle insieme)
+#   La sezione "gruppi" in fondo si compila da sola: l'integrazione impara
+#   quali tapparelle si muovono con ogni pulsante/scenario e, se una di esse
+#   non risponde, le manda il comando singolarmente (recupero automatico).
+#   Per ogni gruppo puoi modificare SOLO:
+#     nome: "Pulsante sala"        -> un nome a tua scelta (facoltativo)
+#     correzione: si               -> si = recupero attivo, no = disattivato
+#     esclusi: ["Lavanderia"]      -> tapparelle da non recuperare mai
+#   Le righe membri / codici / osservazioni sono informative e vengono
+#   aggiornate automaticamente: non serve modificarle.
+#
 # NOTE
 #   - Non cambiare i nomi delle tapparelle (sono quelli dell'app Finder YOU).
 #   - Le nuove tapparelle vengono aggiunte da sole con valore auto.
@@ -87,6 +100,8 @@ class CustomRoutingMap:
         self._nodes_written: str | None = None
         self._warned: set[tuple[str, str]] = set()
         self._uuid_by_name: dict[str, str] = {}
+        self._group_raw: dict[str, dict[str, Any]] = {}
+        self._groups_written: str | None = None
 
     @property
     def path(self) -> str:
@@ -110,22 +125,56 @@ class CustomRoutingMap:
                 if k is None:
                     continue
                 out[str(k).strip()] = AUTO if v is None else str(v).strip()
+        groups = data.get(GROUPS_SECTION) if isinstance(data, dict) else None
+        self._group_raw = {}
+        if isinstance(groups, dict):
+            for gid, cfg in groups.items():
+                if isinstance(cfg, dict):
+                    self._group_raw[str(gid).upper()] = cfg
         return out, nodes_line
 
-    def _write_file(self, names: list[tuple[str, str]], nodes: list[str]) -> None:
+    def _write_file(
+        self,
+        names: list[tuple[str, str]],
+        nodes: list[str],
+        groups: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         nodes_txt = ", ".join(nodes) if nodes else "(nessuno al momento)"
         lines = [_HEADER, f"# ESP32 rilevati: {nodes_txt}", f"{SECTION}:"]
         for name, uuid in names:
             value = self._by_name.get(name, AUTO) or AUTO
             lines.append(f"  {json.dumps(name, ensure_ascii=False)}: {value}   # uuid {uuid[:8]}")
+        groups = groups or {}
+        lines.append("")
+        lines.append(f"{GROUPS_SECTION}:" + ("" if groups else " {}   # nessun gruppo appreso finora"))
+        for gid, info in sorted(groups.items()):
+            raw = self._group_raw.get(gid, {})
+            nome = str(raw.get("nome") or "")
+            enabled = self._is_enabled(raw)
+            esclusi = [str(x) for x in (raw.get("esclusi") or [])]
+            codici = ", ".join(f"{json.dumps(k)}: {v}" for k, v in info.get("codici", {}).items())
+            lines.append(f"  {json.dumps(gid)}:")
+            lines.append(f"    nome: {json.dumps(nome, ensure_ascii=False)}")
+            lines.append(f"    correzione: {'si' if enabled else 'no'}")
+            lines.append(f"    esclusi: {json.dumps(esclusi, ensure_ascii=False)}")
+            lines.append("    # --- appreso automaticamente ---")
+            lines.append(f"    membri: {json.dumps(info.get('membri', []), ensure_ascii=False)}")
+            lines.append(f"    codici: {{{codici}}}")
+            lines.append(f"    osservazioni: {int(info.get('osservazioni', 0))}")
         tmp = self._path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines) + "\n")
         os.replace(tmp, self._path)
         self._mtime = os.path.getmtime(self._path)
         self._nodes_written = nodes_txt
+        self._groups_written = json.dumps(groups, sort_keys=True)
 
-    def sync(self, shutters: list[tuple[str, str]], nodes: list[str]) -> None:
+    def sync(
+        self,
+        shutters: list[tuple[str, str]],
+        nodes: list[str],
+        groups: dict[str, dict[str, Any]] | None = None,
+    ) -> None:
         """Reload the file if changed and (re)generate it when needed.
 
         ``shutters`` is a list of (name, uuid); ``nodes`` the detected
@@ -160,9 +209,14 @@ class CustomRoutingMap:
                     _LOGGER.warning("Cannot read %s (%s); keeping previous values", self._path, err)
                     return
 
+        groups = groups or {}
+        groups_txt = json.dumps(groups, sort_keys=True)
         missing = [n for n, _ in names if n not in self._by_name]
-        if not exists or missing or self._nodes_written != nodes_txt:
-            self._write_file(names, nodes)
+        if self._groups_written is None and exists and file_nodes is not None:
+            # first load after start: compare against what the file shows
+            self._groups_written = json.dumps(self._file_groups_view(), sort_keys=True)
+        if not exists or missing or self._nodes_written != nodes_txt or self._groups_written != groups_txt:
+            self._write_file(names, nodes, groups)
             _LOGGER.info(
                 "Routing map %s %s (%d shutters, nodes: %s)",
                 self._path,
@@ -171,7 +225,33 @@ class CustomRoutingMap:
                 nodes_txt,
             )
 
+    def _file_groups_view(self) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for gid, raw in self._group_raw.items():
+            out[gid] = {
+                "membri": list(raw.get("membri") or []),
+                "codici": {str(k): str(v) for k, v in (raw.get("codici") or {}).items()},
+                "osservazioni": int(raw.get("osservazioni") or 0),
+            }
+        return out
+
+    @staticmethod
+    def _is_enabled(raw: dict[str, Any]) -> bool:
+        value = raw.get("correzione", True)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in _TRUE
+
     # ---- queries (event loop) -------------------------------------------
+
+    def group_settings(self, group_id: str) -> dict[str, Any]:
+        """User settings for a learned group: enabled, excluded names, name."""
+        raw = self._group_raw.get(group_id.upper(), {})
+        return {
+            "enabled": self._is_enabled(raw),
+            "excluded": {str(x).strip() for x in (raw.get("esclusi") or [])},
+            "name": str(raw.get("nome") or "").strip(),
+        }
 
     def preferred_node(self, uuid: str, available_nodes: set[str]) -> str | None:
         """Return the node to try first for ``uuid``, or None for auto."""
