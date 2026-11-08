@@ -716,5 +716,91 @@ async def test_full_entry_setup_smoke(hass, tmp_path):
     assert any(e.startswith("cover.") for e in states)
     assert "sensor.sala_finestra_sx_segnale_ble" in states
     assert any(e.startswith("sensor.sala_finestra_sx_") and ("reception" in e or "ricezione" in e) for e in states)
+    assert hass.states.get("select.gruppo_finder_0b0000_aggiungi_tapparella") is None  # no groups yet
     assert any("cloud_reconnections" in e for e in states)
     assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+# --- v0.3.1: manual members, "debole" reception ------------------------------
+
+CUCINA_DX = "8c159fa2-6305-452d-8805-12e03b66d278"
+
+
+def _with_kitchen(c):
+    c._shutters.append(_shutter(CUCINA_DX, "Cucina finestra dx"))
+    c.data[CUCINA_DX] = 100
+
+
+async def test_manual_member_is_corrected(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    _with_kitchen(c)
+    seq = await _teach(hass, sup)  # Cucina dx never seen moving -> not learned
+    assert CUCINA_DX not in sup.members("0B0000")
+    sup.add_manual_member("0B0000", CUCINA_DX)
+    assert CUCINA_DX in sup.members("0B0000") and CUCINA_DX not in sup.learned_members("0B0000")
+    assert "Cucina finestra dx (manuale)" in sup.summary()["0B0000"]["membri"]
+    c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0, CUCINA_DX: 0}
+    await _press(hass, sup, CMD_OPEN, seq, [SALA_DX, SALA_SX, INGRESSO], "open")
+    c.async_set_position.assert_awaited_once_with(CUCINA_DX, 100)
+
+
+async def test_manual_member_alone_is_not_evidence(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    _with_kitchen(c)
+    seq = await _teach(hass, sup)
+    sup.add_manual_member("0B0000", CUCINA_DX)
+    c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0, CUCINA_DX: 0}
+    # only the manual member moves: not enough evidence that the group fired
+    await _press(hass, sup, CMD_OPEN, seq, [CUCINA_DX], "open")
+    c.async_set_position.assert_not_called()
+
+
+async def test_remove_manual_member(hass, tmp_path):
+    c, sup = _sup_coord(hass, tmp_path)
+    _with_kitchen(c)
+    await _teach(hass, sup)
+    sup.add_manual_member("0B0000", CUCINA_DX)
+    sup.remove_manual_member("0B0000", CUCINA_DX)
+    assert CUCINA_DX not in sup.members("0B0000")
+
+
+async def test_select_entities_add_and_remove(hass, tmp_path):
+    from custom_components.finder_you.group_entities import (
+        GroupAddMemberSelect, GroupRemoveManualSelect, async_setup_group_entities, select_factory, switch_factory,
+    )
+
+    c, sup = _sup_coord(hass, tmp_path)
+    _with_kitchen(c)
+    entry = MockConfigEntry(domain=DOMAIN, data={"email": "a@b.c", "password": "x"})
+    entry.add_to_hass(hass)
+    switches, selects = [], []
+    async_setup_group_entities(hass, entry, c, lambda e: switches.extend(e), switch_factory)
+    async_setup_group_entities(hass, entry, c, lambda e: selects.extend(e), select_factory)
+    await _teach(hass, sup)
+    await hass.async_block_till_done()
+    add = next(e for e in selects if isinstance(e, GroupAddMemberSelect))
+    rem = next(e for e in selects if isinstance(e, GroupRemoveManualSelect))
+    for e in (add, rem):
+        e.hass = hass
+        e.async_write_ha_state = lambda: None
+    assert add.options == ["—", "Cucina finestra dx"]
+    assert rem.options == ["—"]
+    await add.async_select_option("Cucina finestra dx")
+    await hass.async_block_till_done()
+    assert any(e.name == "Includi Cucina finestra dx" for e in switches)
+    assert add.options == ["—"] and rem.options == ["—", "Cucina finestra dx"]
+    await rem.async_select_option("Cucina finestra dx")
+    await hass.async_block_till_done()
+    assert CUCINA_DX not in sup.members("0B0000")
+    n = len(switches)
+    await add.async_select_option("Cucina finestra dx")  # can be added again
+    await hass.async_block_till_done()
+    assert len(switches) == n + 1
+
+
+def test_reception_weak_state():
+    t = SignalTracker()
+    t.note_direct("u", "finder_ble_1", -95, now=1000)
+    assert t.reception("u", now=1000) == "debole"
+    t.note_direct("u", "finder_ble_1", -70, now=1070)
+    assert t.reception("u", now=1070) == "diretta"

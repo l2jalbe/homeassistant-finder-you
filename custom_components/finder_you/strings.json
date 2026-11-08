@@ -34,7 +34,8 @@
         "name": "Reception",
         "state": {
           "diretta": "Direct",
-          "solo_mesh": "Mesh relay only"
+          "solo_mesh": "Mesh relay only",
+          "debole": "Weak"
         }
       }
     }

@@ -6,6 +6,8 @@ Device "Gruppo Finder <id>" (rename it in HA to give the group a name):
 - sensor  "Correzioni"              -> recoveries done for this group
 - sensor  "Osservazioni"            -> learning observations (members/codes in attributes)
 - button  "Dimentica gruppo"        -> drop what was learned (device removed)
+- select  "Aggiungi tapparella"     -> add a shutter by hand (manual member)
+- select  "Rimuovi tapparella aggiunta a mano"
 
 Entities appear by themselves when a group becomes known or gains a member
 (dispatcher signal from GroupSupervisor); no restart needed.
@@ -17,12 +19,14 @@ from collections.abc import Callable, Iterable
 from typing import Any
 
 from homeassistant.components.button import ButtonEntity
+from homeassistant.components.select import SelectEntity
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -57,12 +61,20 @@ def async_setup_group_entities(
 
     @callback
     def _sync() -> None:
-        known = set(coordinator.group_supervisor.known_groups())
-        for key in list(added):  # forgotten groups can be re-added if re-learned
-            if key[0] not in known:
+        wanted = dict(factory(coordinator))
+        # keys that disappeared (forgotten group, removed manual member) can be
+        # added again later; their stale entities are removed from the registry
+        ent_reg = er.async_get(hass)
+        for key in list(added):
+            if key not in wanted:
                 added.discard(key)
+                entity_id = ent_reg.async_get_entity_id(
+                    _PLATFORM_OF.get(factory, ""), DOMAIN, f"{DOMAIN}_group_{key[0]}_{key[1]}"
+                )
+                if entity_id:
+                    ent_reg.async_remove(entity_id)
         new: list[Entity] = []
-        for key, make in factory(coordinator):
+        for key, make in wanted.items():
             if key not in added:
                 added.add(key)
                 new.append(make())
@@ -215,3 +227,81 @@ class ForgetGroupButton(_GroupEntity, ButtonEntity):
 def button_factory(coordinator: FinderYouCoordinator):
     for gid in coordinator.group_supervisor.known_groups():
         yield (gid, "forget"), (lambda g=gid: ForgetGroupButton(coordinator, g))
+
+
+# ---- selects: manual members ---------------------------------------------
+
+_NONE = "—"
+
+
+class _GroupMemberSelect(_GroupEntity, SelectEntity):
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_current_option = _NONE
+
+    def _names(self) -> dict[str, str]:
+        return {s.uuid: s.name.strip() for s in self.coordinator.shutters}
+
+    def _candidates(self) -> list[str]:
+        raise NotImplementedError
+
+    @property
+    def options(self) -> list[str]:
+        names = self._names()
+        return [_NONE] + sorted(names.get(u, u[:8]) for u in self._candidates())
+
+    def _uuid_for(self, option: str) -> str | None:
+        return next((u for u, n in self._names().items() if n == option), None)
+
+
+class GroupAddMemberSelect(_GroupMemberSelect):
+    """Pick a shutter to add by hand to this group."""
+
+    _attr_name = "Aggiungi tapparella"
+    _attr_icon = "mdi:plus-box-multiple"
+
+    def __init__(self, coordinator: FinderYouCoordinator, group_id: str) -> None:
+        super().__init__(coordinator, group_id, "add_member")
+
+    def _candidates(self) -> list[str]:
+        members = set(self._sup.members(self._gid))
+        return [s.uuid for s in self.coordinator.shutters if s.uuid not in members]
+
+    async def async_select_option(self, option: str) -> None:
+        uuid = self._uuid_for(option)
+        if uuid:
+            self._sup.add_manual_member(self._gid, uuid)
+        self.async_write_ha_state()
+
+
+class GroupRemoveManualSelect(_GroupMemberSelect):
+    """Pick a hand-added shutter to remove from this group."""
+
+    _attr_name = "Rimuovi tapparella aggiunta a mano"
+    _attr_icon = "mdi:minus-box-multiple"
+
+    def __init__(self, coordinator: FinderYouCoordinator, group_id: str) -> None:
+        super().__init__(coordinator, group_id, "remove_member")
+
+    def _candidates(self) -> list[str]:
+        learned = set(self._sup.learned_members(self._gid))
+        return [u for u in self._sup.manual_members(self._gid) if u not in learned]
+
+    async def async_select_option(self, option: str) -> None:
+        uuid = self._uuid_for(option)
+        if uuid:
+            self._sup.remove_manual_member(self._gid, uuid)
+        self.async_write_ha_state()
+
+
+def select_factory(coordinator: FinderYouCoordinator):
+    for gid in coordinator.group_supervisor.known_groups():
+        yield (gid, "add_member"), (lambda g=gid: GroupAddMemberSelect(coordinator, g))
+        yield (gid, "remove_member"), (lambda g=gid: GroupRemoveManualSelect(coordinator, g))
+
+
+_PLATFORM_OF = {
+    switch_factory: "switch",
+    sensor_factory: "sensor",
+    button_factory: "button",
+    select_factory: "select",
+}

@@ -8,7 +8,8 @@ For every device the tracker records:
 The "Segnale BLE" sensor publishes the average of the samples collected in
 each PUBLISH_INTERVAL (at most one value per minute per shutter, so the
 recorder is not flooded); "Ricezione" tells whether the shutter is heard
-directly or only through the mesh. Shutters transmit only when they move,
+directly ("diretta"), directly but weakly ("debole", average below
+-90 dBm: frames often lost) or only through the mesh ("solo_mesh"). Shutters transmit only when they move,
 so values update when the shutters are used.
 """
 
@@ -19,8 +20,10 @@ from dataclasses import dataclass, field
 
 PUBLISH_INTERVAL = 60.0
 RECEPTION_DIRECT = "diretta"
+RECEPTION_WEAK = "debole"
 RECEPTION_MESH = "solo_mesh"
-RECEPTION_OPTIONS = [RECEPTION_DIRECT, RECEPTION_MESH]
+RECEPTION_OPTIONS = [RECEPTION_DIRECT, RECEPTION_WEAK, RECEPTION_MESH]
+WEAK_RSSI_DBM = -90  # direct, but average below this -> "debole"
 DIRECT_MEMORY_S = 7 * 24 * 3600  # a direct sighting counts as "diretta" for a week
 
 
@@ -97,6 +100,8 @@ class SignalTracker:
         if d is None:
             return None
         if d.last_direct is not None and now - d.last_direct < DIRECT_MEMORY_S:
+            if d.value is not None and d.value < WEAK_RSSI_DBM:
+                return RECEPTION_WEAK
             return RECEPTION_DIRECT
         if d.last_relay is not None:
             return RECEPTION_MESH

@@ -113,7 +113,15 @@ Le impostazioni si gestiscono da Home Assistant: ogni gruppo noto è un
 dispositivo **"Gruppo Finder `<codice>`"** (`group_entities.py`) con
 l'interruttore **Correzione automatica**, un interruttore **Includi
 `<tapparella>`** per ogni membro, i sensori **Correzioni** e **Osservazioni**
-(membri e codici negli attributi) e il pulsante **Dimentica gruppo**.
+(membri e codici negli attributi), il pulsante **Dimentica gruppo** e i menu
+**Aggiungi tapparella** / **Rimuovi tapparella aggiunta a mano**.
+
+**Membri manuali** (v0.3.1): una tapparella aggiunta a mano è sempre membro,
+anche se l'apprendimento non l'ha mai vista muoversi (tipicamente segnale
+≤ −90 dBm: l'ESP32 non sente l'avvio del motore). Come prova che il comando di
+gruppo è stato eseguito contano solo i membri **appresi**. Se l'ESP32 non sente
+un membro manuale, HA lo "corregge" anche quando si stava già muovendo: è
+innocuo (stesso bersaglio) ma fa salire il contatore Correzioni.
 Rinominando il dispositivo si dà un nome al gruppo (usato anche nei log). I
 dispositivi compaiono da soli quando un gruppo diventa noto o acquisisce un
 membro (segnale dispatcher `finder_you_groups_updated`). Impostazioni e dati
@@ -136,7 +144,8 @@ Ogni frame di stato **diretto** aggiunge un campione RSSI (per ESP32); ogni
 frame **rilanciato** aggiorna l'ultima ricezione via mesh. Il sensore
 **Segnale BLE** pubblica la media dei campioni al massimo una volta al minuto
 (storico leggero); **Ricezione** vale *diretta* se la tapparella è stata sentita
-direttamente negli ultimi 7 giorni, altrimenti *solo_mesh*.
+direttamente negli ultimi 7 giorni, *debole* se diretta ma con media sotto
+−90 dBm, altrimenti *solo_mesh*.
 
 ## Nodo ESP32 (`esphome/`)
 

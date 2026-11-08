@@ -203,6 +203,27 @@ class GroupSupervisor:
             excluded.append(uuid)
         self._save()
 
+    @callback
+    def add_manual_member(self, group_id: str, uuid: str) -> None:
+        """Add a shutter by hand: it stays a member even if never seen moving.
+
+        Needed for shutters whose status frames the ESP32 rarely hears (or
+        that always miss the group command): learning can never see them.
+        """
+        manual = self._settings(group_id).setdefault("manual", [])
+        if uuid not in manual:
+            manual.append(uuid)
+            self._save()
+            self._notify()
+
+    @callback
+    def remove_manual_member(self, group_id: str, uuid: str) -> None:
+        manual = self._settings(group_id).setdefault("manual", [])
+        if uuid in manual:
+            manual.remove(uuid)
+            self._save()
+            self._notify()
+
     def corrections(self, group_id: str) -> int:
         return int(self._groups.get(group_id, {}).get("corrections", 0))
 
@@ -244,7 +265,8 @@ class GroupSupervisor:
                 out[uuid] = direction
         return out
 
-    def members(self, group_id: str) -> list[str]:
+    def learned_members(self, group_id: str) -> list[str]:
+        """Members learned from observed motion."""
         g = self._groups.get(group_id)
         if not g:
             return []
@@ -254,6 +276,16 @@ class GroupSupervisor:
             for u, n in g.get("members", {}).items()
             if n >= MIN_MEMBER_COUNT and n / obs >= MIN_MEMBER_RATIO
         ]
+
+    def manual_members(self, group_id: str) -> list[str]:
+        """Members added by hand (always members, see add_manual_member)."""
+        return list(self._groups.get(group_id, {}).get("settings", {}).get("manual", []))
+
+    def members(self, group_id: str) -> list[str]:
+        """Learned + manual members."""
+        out = self.learned_members(group_id)
+        out += [u for u in self.manual_members(group_id) if u not in out]
+        return out
 
     def code_direction(self, group_id: str, code: int) -> str | None:
         g = self._groups.get(group_id)
@@ -270,7 +302,11 @@ class GroupSupervisor:
 
     def is_known(self, group_id: str) -> bool:
         g = self._groups.get(group_id)
-        return bool(g) and int(g.get("obs", 0)) >= MIN_GROUP_OBSERVATIONS and bool(self.members(group_id))
+        return (
+            bool(g)
+            and int(g.get("obs", 0)) >= MIN_GROUP_OBSERVATIONS
+            and bool(self.learned_members(group_id))
+        )
 
     def summary(self) -> dict[str, dict[str, Any]]:
         """Readable view for the routing map file."""
@@ -281,8 +317,11 @@ class GroupSupervisor:
             for code_hex in sorted(g.get("codes", {})):
                 d = self.code_direction(gid, int(code_hex, 16))
                 codes[code_hex] = {"open": "apri", "close": "chiudi"}.get(d or "", "?")
+            manual = set(self.manual_members(gid)) - set(self.learned_members(gid))
             out[gid] = {
-                "membri": sorted(names.get(u, u[:8]) for u in self.members(gid)),
+                "membri": sorted(
+                    names.get(u, u[:8]) + (" (manuale)" if u in manual else "") for u in self.members(gid)
+                ),
                 "codici": codes,
                 "osservazioni": int(g.get("obs", 0)),
             }
@@ -333,7 +372,8 @@ class GroupSupervisor:
             return
         target = DIRECTION_TARGET[direction]
         movers = self._movers(obs, obs.ts + CORRECTION_DELAY_S + 0.5)
-        if not any(d == direction for d in movers.values()):
+        learned = set(self.learned_members(obs.group_id))
+        if not any(d == direction for u, d in movers.items() if u in learned):
             return  # no evidence the group command was executed: do nothing
         names = {s.uuid: s.name.strip() for s in self._coordinator.shutters}
         for uuid in self.members(obs.group_id):

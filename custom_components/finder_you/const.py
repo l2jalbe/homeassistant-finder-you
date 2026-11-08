@@ -22,4 +22,4 @@ STABLE_SCAN_INTERVAL_SECONDS = 120
 # is dropped and the connection rebuilt.
 STABLE_MAX_POLL_FAILURES_BEFORE_DROP = 3
 
-PLATFORMS: list[str] = ["cover", "sensor", "scene", "light", "switch", "button"]
+PLATFORMS: list[str] = ["cover", "sensor", "scene", "light", "switch", "button", "select"]

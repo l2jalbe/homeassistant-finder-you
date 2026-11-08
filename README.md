@@ -14,7 +14,7 @@ Nasce per far funzionare l'integrazione su un impianto con **gateway
 1Y.GU.005**, renderla utilizzabile su qualsiasi casa e aggiungere funzioni che
 il sistema Finder non offre.
 
-> Versione attuale: **0.3.0** — dettagli in [CHANGELOG.md](CHANGELOG.md).
+> Versione attuale: **0.3.1** — dettagli in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -40,8 +40,9 @@ il sistema Finder non offre.
 - **Segnale BLE** (dBm, diagnostica) — media al minuto del segnale con cui
   l'ESP32 riceve direttamente la tapparella; nel grafico vedi l'andamento,
   negli attributi l'ESP32 migliore e il valore per ogni ESP32
-- **Ricezione** (diagnostica) — *Diretta* oppure *Solo via mesh*: il modo più
-  rapido per individuare le tapparelle critiche
+- **Ricezione** (diagnostica) — *Diretta*, *Debole* (diretta ma con media
+  sotto −90 dBm: molti frame persi) oppure *Solo via mesh*: il modo più rapido
+  per individuare le tapparelle critiche
 
 **Scenari Finder YOU** — un solo dispositivo con tutte le `scene.*` dell'app
 (eseguite dal gateway via cloud).
@@ -54,6 +55,9 @@ reconnections*, *Handshake age*, *Last command age*, *Telemetry age*,
 appreso (rinominalo, es. "Pulsante sala"):
 - **Correzione automatica** — attiva/disattiva il recupero per il gruppo
 - **Includi `<tapparella>`** — un interruttore per ogni membro
+- **Aggiungi tapparella** / **Rimuovi tapparella aggiunta a mano** — membri
+  inseriti a mano, per le tapparelle che l'apprendimento non vede (es. segnale
+  troppo debole perché l'ESP32 ne senta l'avvio)
 - **Correzioni**, **Osservazioni** (membri e codici negli attributi)
 - **Dimentica gruppo** — azzera quanto appreso
 
@@ -90,8 +94,11 @@ cifrato; capita che una tapparella con ricezione debole non lo riceva.
 L'integrazione **impara da sola** quali tapparelle si muovono con ogni gruppo e
 cosa significa ogni codice (apri/chiudi); quando un membro non parte entro
 2,5 s nella direzione giusta gli manda il **comando singolo** (BLE, poi cloud).
-Non interviene mai per codici sconosciuti, se nessun membro si è mosso, se la
-tapparella è già al bersaglio o se nel frattempo arriva un nuovo comando.
+Non interviene mai per codici sconosciuti, se nessun membro appreso si è mosso,
+se la tapparella è già al bersaglio o se nel frattempo arriva un nuovo comando.
+Le tapparelle che l'apprendimento non riesce a vedere si aggiungono a mano dal
+dispositivo del gruppo (membri "manuali"): aggiungendo una tapparella che il
+pulsante non comanda, HA la muoverà comunque insieme al gruppo.
 Dettagli in [ROUTING.md](ROUTING.md).
 
 ---

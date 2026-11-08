@@ -34,7 +34,8 @@
         "name": "Ricezione",
         "state": {
           "diretta": "Diretta",
-          "solo_mesh": "Solo via mesh"
+          "solo_mesh": "Solo via mesh",
+          "debole": "Debole"
         }
       }
     }

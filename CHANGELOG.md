@@ -2,6 +2,15 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.3.1] - 2026-11-08
+
+### Aggiunto
+- **Membri manuali nei gruppi**: menu *Aggiungi tapparella* e *Rimuovi tapparella aggiunta a mano* (nuova piattaforma `select`) su ogni dispositivo gruppo, per le tapparelle che l'apprendimento non vede (es. segnale troppo debole perché l'ESP32 ne senta l'avvio). I membri manuali sono sempre inclusi e indicati come "(manuale)"; come prova che il comando di gruppo è stato eseguito contano solo i membri appresi.
+- Stato **Debole** nel sensore *Ricezione*: ricevuta direttamente ma con segnale medio sotto −90 dBm.
+
+### Corretto
+- Le entità di un membro rimosso vengono eliminate e ricreate correttamente se il membro viene riaggiunto.
+
 ## [0.3.0] - 2026-11-08
 
 ### Aggiunto
