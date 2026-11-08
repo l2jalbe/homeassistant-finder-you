@@ -2,6 +2,14 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.1.5] - 2026-11-08
+
+### Aggiunto
+- Icona dell'integrazione (`brand/icon.png`, `brand/icon@2x.png`), mostrata da Home Assistant 2026.3+.
+
+### Modificato
+- README riscritto: differenze rispetto al progetto originale (gateway 1Y.GU.005, ESP32 e mesh), installazione dal fork, limiti noti, crediti.
+
 ## [0.1.4] - 2026-11-08
 
 ### Aggiunto
