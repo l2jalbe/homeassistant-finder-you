@@ -2,6 +2,20 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.1.4] - 2026-11-08
+
+### Aggiunto
+- **Mappa personalizzata** `/config/finder_you_mappa_personalizzata.yaml` (modulo `routing_map.py`): generata automaticamente con tutte le tapparelle a `auto` e con istruzioni in testa; scrivendo il nome di un ESP32 al posto di `auto` quell'ESP32 viene provato per primo. Nuove tapparelle ed elenco ESP32 aggiornati da soli, valori utente conservati, modifiche rilette senza riavviare HA, file con errori mai sovrascritto.
+- Nel log, per ogni conferma BLE: tempo impiegato, ESP32 usato e se la conferma è arrivata diretta o rilanciata dalla mesh.
+- `ROUTING.md`: come funziona la scelta dell'ESP32 e come estenderla.
+
+### Modificato
+- Attesa della conferma BLE ridotta da 3,5 s a **2,0 s** prima di ritentare / passare al cloud.
+- Scelta dell'ESP32 solo in base al segnale (più la mappa personalizzata).
+
+### Rimosso
+- Regole specifiche della casa dell'autore originale: `NODE_ADJACENCY_MAP`, `SOURCE_MAC_TO_NODE_MAP`, mappe parole chiave stanza → ESP32 (`_get_affinity_node`, alias map). Restano nella cronologia git al commit `bb921a6`.
+
 ## [0.1.3] - 2026-11-08
 
 ### Aggiunto

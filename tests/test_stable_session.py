@@ -292,3 +292,97 @@ async def test_motion_expires(hass):
     c._shutter_durations[UUID] = (20.0, 20.0)
     c._shutter_motion[UUID] = ("closing", time.time() - 31)
     assert c.shutter_motion(UUID) is None
+
+
+# --- Routing map (/config/finder_you_mappa_personalizzata.yaml) ---------------
+
+from custom_components.finder_you.routing_map import CustomRoutingMap  # noqa: E402
+
+SHUTTERS = [("Cucina finestra sx ", "b36d8cd3-aaaa"), ("Lavanderia", "31fff8d8-bbbb"), ("1P Bagno ", "f68df89d-cccc")]
+
+
+def test_routing_map_created_with_all_shutters_auto(tmp_path):
+    p = tmp_path / "finder_you_mappa_personalizzata.yaml"
+    m = CustomRoutingMap(str(p))
+    m.sync(SHUTTERS, ["finder_ble_1"])
+    text = p.read_text()
+    assert "COME SI COMPILA" in text
+    assert '"Cucina finestra sx": auto' in text
+    assert '"Lavanderia": auto' in text
+    assert '"1P Bagno": auto' in text
+    assert "# ESP32 rilevati: finder_ble_1" in text
+    assert m.preferred_node("b36d8cd3-aaaa", {"finder_ble_1"}) is None
+
+
+def test_routing_map_user_value_used_and_preserved(tmp_path):
+    p = tmp_path / "m.yaml"
+    m = CustomRoutingMap(str(p))
+    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
+    p.write_text(p.read_text().replace('"Cucina finestra sx": auto', '"Cucina finestra sx": finder-ble-2'))
+    import os, time as _t
+    os.utime(p, (_t.time() + 5, _t.time() + 5))
+    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
+    assert m.preferred_node("b36d8cd3-aaaa", {"finder_ble_1", "finder_ble_2"}) == "finder_ble_2"
+    assert m.preferred_node("31fff8d8-bbbb", {"finder_ble_1", "finder_ble_2"}) is None
+    # new shutter + new node -> file rewritten, user value kept
+    m.sync(SHUTTERS + [("Sala finestra dx", "72a6279a-dddd")], ["finder_ble_1", "finder_ble_2", "finder_ble_3"])
+    text = p.read_text()
+    assert '"Cucina finestra sx": finder-ble-2' in text
+    assert '"Sala finestra dx": auto' in text
+    assert "finder_ble_3" in text
+
+
+def test_routing_map_offline_or_unknown_node_falls_back_to_auto(tmp_path):
+    p = tmp_path / "m.yaml"
+    m = CustomRoutingMap(str(p))
+    m.sync(SHUTTERS, ["finder_ble_1"])
+    p.write_text(p.read_text().replace('"Lavanderia": auto', '"Lavanderia": esp_inesistente'))
+    import os, time as _t
+    os.utime(p, (_t.time() + 5, _t.time() + 5))
+    m.sync(SHUTTERS, ["finder_ble_1"])
+    assert m.preferred_node("31fff8d8-bbbb", {"finder_ble_1"}) is None
+
+
+def test_routing_map_syntax_error_keeps_previous_values(tmp_path):
+    p = tmp_path / "m.yaml"
+    m = CustomRoutingMap(str(p))
+    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
+    p.write_text(p.read_text().replace('"Lavanderia": auto', '"Lavanderia": finder_ble_2'))
+    import os, time as _t
+    os.utime(p, (_t.time() + 5, _t.time() + 5))
+    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
+    broken = 'tapparelle:\n  "Lavanderia": [unclosed\n'
+    p.write_text(broken)
+    os.utime(p, (_t.time() + 10, _t.time() + 10))
+    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
+    assert p.read_text() == broken  # never overwrite a file being edited
+    assert m.preferred_node("31fff8d8-bbbb", {"finder_ble_1", "finder_ble_2"}) == "finder_ble_2"
+
+
+async def test_select_best_node_uses_routing_map_then_rssi(hass, tmp_path):
+    c, r = _router_with_shutter(hass)
+    r._esphome_nodes = {"finder_ble_1", "finder_ble_2"}
+    r._discover_registered_nodes = lambda: None
+    dev = c._ble_inventory[UUID]
+    now = time.time()
+    r._topology[DIRECT] = {
+        "finder_ble_1": {"rssi": -65, "last_seen": now},
+        "finder_ble_2": {"rssi": -80, "last_seen": now},
+    }
+    c.routing_map = CustomRoutingMap(str(tmp_path / "m.yaml"))
+    c.routing_map.sync([("Cucina finestra sx", UUID)], ["finder_ble_1", "finder_ble_2"])
+    assert r.select_best_node(dev) == "finder_ble_1"  # auto -> best RSSI
+    assert r.select_alternate_node(dev, exclude_node="finder_ble_1") == "finder_ble_2"
+    c.routing_map._by_name["Cucina finestra sx"] = "finder_ble_2"
+    assert r.select_best_node(dev) == "finder_ble_2"  # forced
+    assert r.select_alternate_node(dev, exclude_node="finder_ble_2") == "finder_ble_1"
+    r._esphome_nodes = {"finder_ble_1"}  # forced node offline -> auto
+    assert r.select_best_node(dev) == "finder_ble_1"
+
+
+async def test_no_author_specific_rules_left(hass):
+    from custom_components.finder_you import topology
+
+    src = open(topology.__file__).read()
+    for token in ("bluetooth_proxy_sara", "esphome_web_cef3a0", "18264c", "NODE_ADJACENCY_MAP", "SOURCE_MAC_TO_NODE_MAP", "_get_affinity_node"):
+        assert token not in src

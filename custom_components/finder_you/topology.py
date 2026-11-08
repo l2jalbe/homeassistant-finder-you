@@ -29,67 +29,11 @@ TOPOLOGY_STALE_TIMEOUT = 300.0
 # Guard duration in seconds to ignore delayed or stale mesh telemetry after a local transmission
 BLE_TX_GUARD_DURATION = 6.0
 
-# Physical room adjacency order for fallback proxy selection when RSSI is unavailable
-NODE_ADJACENCY_MAP: dict[str, list[str]] = {
-    "esphome_web_cef3a0": [
-        "bluetooth_proxy_edge",
-        "bluetooth_proxy_sara",
-        "bluetooth_proxy_rack_183048",
-        "esphome_web_ce31c4",
-        "esp32_bluetooth_proxy_18264c",
-    ],
-    "bluetooth_proxy_edge": [
-        "esphome_web_cef3a0",
-        "bluetooth_proxy_sara",
-        "bluetooth_proxy_rack_183048",
-        "esp32_bluetooth_proxy_18264c",
-        "esphome_web_ce31c4",
-    ],
-    "bluetooth_proxy_sara": [
-        "bluetooth_proxy_edge",
-        "esphome_web_cef3a0",
-        "bluetooth_proxy_rack_183048",
-        "esp32_bluetooth_proxy_18264c",
-        "esphome_web_ce31c4",
-    ],
-    "bluetooth_proxy_rack_183048": [
-        "esphome_web_cef3a0",
-        "bluetooth_proxy_sara",
-        "bluetooth_proxy_edge",
-        "esp32_bluetooth_proxy_18264c",
-        "esphome_web_ce31c4",
-    ],
-    "esphome_web_ce31c4": [
-        "esp32_bluetooth_proxy_18264c",
-        "bluetooth_proxy_rack_183048",
-        "esphome_web_cef3a0",
-        "bluetooth_proxy_sara",
-        "bluetooth_proxy_edge",
-    ],
-    "esp32_bluetooth_proxy_18264c": [
-        "esphome_web_ce31c4",
-        "bluetooth_proxy_rack_183048",
-        "esphome_web_cef3a0",
-        "bluetooth_proxy_sara",
-        "bluetooth_proxy_edge",
-    ],
-}
-
-# Mapping of known ESPHome proxy Bluetooth/WiFi MAC prefixes to ESPHome service node names
-SOURCE_MAC_TO_NODE_MAP: dict[str, str] = {
-    "A8:42:E3:CE:31:C6": "esphome_web_ce31c4",
-    "A8:42:E3:CE:31:C4": "esphome_web_ce31c4",
-    "A8:42:E3:CD:76:F2": "bluetooth_proxy_sara",
-    "A8:42:E3:CD:76:F0": "bluetooth_proxy_sara",
-    "A8:42:E3:CD:24:8E": "bluetooth_proxy_edge",
-    "A8:42:E3:CD:24:8C": "bluetooth_proxy_edge",
-    "30:AE:A4:18:30:4A": "bluetooth_proxy_rack_183048",
-    "30:AE:A4:18:30:48": "bluetooth_proxy_rack_183048",
-    "A8:42:E3:CE:F3:A2": "esphome_web_cef3a0",
-    "A8:42:E3:CE:F3:A0": "esphome_web_cef3a0",
-    "30:AE:A4:18:26:4E": "esp32_bluetooth_proxy_18264c",
-    "30:AE:A4:18:26:4C": "esp32_bluetooth_proxy_18264c",
-}
+# Node selection is purely signal-based (see ROUTING.md), optionally
+# overridden per shutter by the user's routing map
+# (/config/finder_you_mappa_personalizzata.yaml, module routing_map.py).
+# The original author-specific maps (room adjacency, proxy MACs, room
+# keywords) were removed in v0.1.4; they are in git history at bb921a6.
 
 
 class FinderTopologyRouter:
@@ -106,6 +50,9 @@ class FinderTopologyRouter:
         self._tx_guard_until: dict[str, float] = {}
         # Deduplication cache for identical raw BLE payloads across dual listeners: mac -> (payload_tuple, ts)
         self._last_decoded_adv: dict[str, tuple[tuple[int, ...], float]] = {}
+        # device_uuid -> how its last status frame arrived ("direct via n1",
+        # "mesh relay <mac> via n1"); used for ack latency logging
+        self.last_frame_source: dict[str, str] = {}
         self._unsub_listener = None
         self._unsub_bt_callback = None
 
@@ -204,13 +151,12 @@ class FinderTopologyRouter:
             _LOGGER.debug("Could not register passive HA Bluetooth callback: %s", err)
 
     def _resolve_source_mac_to_node(self, source: str | None) -> str | None:
-        """Map an HA Bluetooth scanner source MAC to a registered ESPHome finder_mesh node."""
-        if not source:
-            return None
-        src_clean = source.upper().replace("-", ":")
-        mapped = SOURCE_MAC_TO_NODE_MAP.get(src_clean)
-        if mapped and mapped in self._esphome_nodes:
-            return mapped
+        """Map an HA Bluetooth scanner source MAC to a registered finder_mesh node.
+
+        No static map: HA Bluetooth sightings are used for telemetry only
+        (node=None); per-node RSSI comes from the ``esphome.finder_ble_adv``
+        events, which carry the ESPHome device_id.
+        """
         return None
 
     @callback
@@ -286,28 +232,7 @@ class FinderTopologyRouter:
                 area_id = (dev_entry.area_id or "").lower()
                 combined = f"{raw_name}_{area_id}".replace("-", "_").replace(" ", "_")
 
-                # Keyword-to-node alias mapping
-                alias_map = {
-                    "cucina": "esphome_web_ce31c4",
-                    "ce31c4": "esphome_web_ce31c4",
-                    "camera_media": "esphome_web_cef3a0",
-                    "cef3a0": "esphome_web_cef3a0",
-                    "sala": "esp32_bluetooth_proxy_18264c",
-                    "soggiorno": "esp32_bluetooth_proxy_18264c",
-                    "18264c": "esp32_bluetooth_proxy_18264c",
-                    "rack": "bluetooth_proxy_rack_183048",
-                    "antibagno": "bluetooth_proxy_rack_183048",
-                    "183048": "bluetooth_proxy_rack_183048",
-                    "sara": "bluetooth_proxy_sara",
-                    "edge": "bluetooth_proxy_edge",
-                }
-
                 matched_node = None
-                for kw, target_node in alias_map.items():
-                    if kw in combined and target_node in self._esphome_nodes:
-                        matched_node = target_node
-                        break
-
                 if not matched_node:
                     for registered in self._esphome_nodes:
                         reg_clean = registered.lower().replace("-", "_")
@@ -498,6 +423,11 @@ class FinderTopologyRouter:
                 channel_states: dict[int, bool] = {}
                 percent_val: int | None = None
                 motion_val: str | None = None
+                self.last_frame_source[matched_dev.uuid] = (
+                    f"mesh relay {repeater_mac} via '{source_label}'"
+                    if repeater_mac
+                    else f"direct via '{source_label}'"
+                )
                 fam = (matched_dev.family or "").upper()
                 is_dimmer = any(k in fam for k in ["1521", "1571"])
                 is_shutter = any(k in fam for k in ["13S2", "SHUTTER"])
@@ -552,46 +482,28 @@ class FinderTopologyRouter:
             return int(info["rssi"])
         return None
 
-    def _get_affinity_node(self, device: BleDirectDevice, channel: int | None = None) -> tuple[str | None, str]:
-        """Return (affinity_node, matched_keyword) based on device/channel name and room."""
-        dev_search_str = ""
-        if self._coordinator:
-            for l in getattr(self._coordinator, "lights", []):
-                if l.uuid == device.uuid and (channel is None or l.channel == channel):
-                    dev_search_str += f" {l.name} {l.room or ''}"
-            for s in getattr(self._coordinator, "shutters", []):
-                if s.uuid == device.uuid:
-                    dev_search_str += f" {s.name} {s.room or ''}"
-            for sw in getattr(self._coordinator, "switches", []):
-                if sw.uuid == device.uuid and (channel is None or sw.channel == channel):
-                    dev_search_str += f" {sw.name} {sw.room or ''}"
-        dev_search_clean = dev_search_str.lower().replace("-", "_").replace(" ", "_")
+    @property
+    def esphome_nodes(self) -> set[str]:
+        return set(self._esphome_nodes)
 
-        affinity_map = {
-            "sara": "bluetooth_proxy_sara",
-            "cameretta": "bluetooth_proxy_sara",
-            "cucina": "esphome_web_ce31c4",
-            "media": "esphome_web_cef3a0",
-            "giochi": "esphome_web_cef3a0",
-            "studio": "esp32_bluetooth_proxy_18264c",
-            "sala": "esp32_bluetooth_proxy_18264c",
-            "soggiorno": "esp32_bluetooth_proxy_18264c",
-            "pranzo": "esp32_bluetooth_proxy_18264c",
-            "ingresso": "esp32_bluetooth_proxy_18264c",
-            "corridoio": "esp32_bluetooth_proxy_18264c",
-            "bagno": "bluetooth_proxy_rack_183048",
-            "lavanderia": "bluetooth_proxy_rack_183048",
-            "rack": "bluetooth_proxy_rack_183048",
-            "matrimoniale": "bluetooth_proxy_edge",
-            "letto": "bluetooth_proxy_edge",
-        }
-        for kw, aff_node in affinity_map.items():
-            if kw in dev_search_clean and aff_node in self._esphome_nodes:
-                return aff_node, kw
-        return None, ""
+    def _user_preferred_node(self, device: BleDirectDevice) -> str | None:
+        """Node forced by the user's routing map for this device, if any."""
+        rmap = getattr(self._coordinator, "routing_map", None) if self._coordinator else None
+        if rmap is None:
+            return None
+        return rmap.preferred_node(device.uuid, self._esphome_nodes)
 
     def select_best_node(self, device: BleDirectDevice, channel: int | None = None) -> str | None:
-        """Select the best ESPHome node to transmit to the target device."""
+        """Select the ESPHome node to transmit to the target device.
+
+        Order (see ROUTING.md):
+        1. node forced in the user's routing map (if online);
+        2. best fresh direct RSSI (< TOPOLOGY_STALE_TIMEOUT);
+        3. best historical direct RSSI (stationary wall devices);
+        4. node with the best fresh RSSI towards ANY Finder device
+           (the mesh will relay the command);
+        5. first available node.
+        """
         self._discover_registered_nodes()
         if not self._esphome_nodes:
             return None
@@ -599,49 +511,25 @@ class FinderTopologyRouter:
         mac_upper = device.mac.upper().replace("-", ":")
         now = time.time()
 
-        aff_node, aff_kw = self._get_affinity_node(device, channel=channel)
+        forced = self._user_preferred_node(device)
+        if forced:
+            _LOGGER.info("Selected node '%s' for MAC %s from user routing map", forced, mac_upper)
+            return forced
 
         candidates = self._topology.get(mac_upper, {})
-        valid_candidates: list[tuple[str, int]] = []
-        for node, info in candidates.items():
-            if node in self._esphome_nodes and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT:
-                valid_candidates.append((node, info.get("rssi", -100)))
-
-        valid_candidates.sort(key=lambda x: x[1], reverse=True)
-        cand_dict = dict(valid_candidates)
-
-        if valid_candidates:
-            best_node, best_rssi = valid_candidates[0]
-            if aff_node:
-                aff_rssi = cand_dict.get(aff_node)
-                if best_node == aff_node:
-                    _LOGGER.info(
-                        "Selected best node '%s' for MAC %s based on room affinity '%s' and direct RSSI (%d dBm)",
-                        best_node,
-                        mac_upper,
-                        aff_kw,
-                        best_rssi,
-                    )
-                    return best_node
-                if best_rssi >= -68 and (aff_rssi is None or best_rssi >= aff_rssi + 8):
-                    _LOGGER.info(
-                        "Selected best node '%s' for MAC %s based on strong direct RSSI (%d dBm, overriding affinity '%s')",
-                        best_node,
-                        mac_upper,
-                        best_rssi,
-                        aff_node,
-                    )
-                    return best_node
-                _LOGGER.info(
-                    "Selected affinity node '%s' ('%s') for MAC %s over weak cross-room RSSI on '%s' (%d dBm)",
-                    aff_node,
-                    aff_kw,
-                    mac_upper,
-                    best_node,
-                    best_rssi,
-                )
-                return aff_node
-
+        fresh = sorted(
+            (
+                (node, info.get("rssi", -100))
+                for node, info in candidates.items()
+                if node in self._esphome_nodes
+                and "rssi" in info
+                and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT
+            ),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        if fresh:
+            best_node, best_rssi = fresh[0]
             _LOGGER.info(
                 "Selected best node '%s' for MAC %s based on direct RSSI (%d dBm)",
                 best_node,
@@ -650,39 +538,32 @@ class FinderTopologyRouter:
             )
             return best_node
 
-        if aff_node:
-            _LOGGER.info(
-                "Selected node '%s' for device %s (%s) based on room/name affinity '%s'",
-                aff_node,
-                device.uuid,
-                device.mac,
-                aff_kw,
-            )
-            return aff_node
+        hist = sorted(
+            (
+                (node, info.get("rssi", -100))
+                for node, info in candidates.items()
+                if node in self._esphome_nodes and "rssi" in info
+            ),
+            key=lambda x: x[1],
+            reverse=True,
+        )
+        if hist:
+            return hist[0][0]
 
-        # Historical RSSI for stationary wall devices when >5 min idle
-        hist_candidates: list[tuple[str, int]] = [
-            (node, info.get("rssi", -100))
-            for node, info in candidates.items()
-            if node in self._esphome_nodes
-        ]
-        if hist_candidates:
-            hist_candidates.sort(key=lambda x: x[1], reverse=True)
-            return hist_candidates[0][0]
-
-        # Sighting via mesh repeaters
+        # Not heard directly: pick the node with the best view of the mesh
         mesh_scores: dict[str, int] = {}
-        for dev_mac, nodes in self._topology.items():
+        for _dev_mac, nodes in self._topology.items():
             for node, info in nodes.items():
-                if node in self._esphome_nodes and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT:
+                if (
+                    node in self._esphome_nodes
+                    and "rssi" in info
+                    and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT
+                ):
                     mesh_scores[node] = max(mesh_scores.get(node, -100), info.get("rssi", -100))
-
         if mesh_scores:
-            best_mesh_node = max(mesh_scores.items(), key=lambda x: x[1])[0]
-            return best_mesh_node
+            return max(mesh_scores.items(), key=lambda x: x[1])[0]
 
-        fallback_node = next(iter(self._esphome_nodes))
-        return fallback_node
+        return sorted(self._esphome_nodes)[0]
 
     def select_alternate_node(
         self,
@@ -690,49 +571,39 @@ class FinderTopologyRouter:
         exclude_node: str | None,
         channel: int | None = None,
     ) -> str | None:
-        """Select the best alternate ESPHome node excluding `exclude_node`."""
+        """Select the best node other than ``exclude_node`` (signal-based)."""
         self._discover_registered_nodes()
         available = [n for n in self._esphome_nodes if n != exclude_node]
         if not available:
             return None
 
-        aff_node, _ = self._get_affinity_node(device, channel=channel)
-        if aff_node and aff_node in available:
-            return aff_node
-
         mac_upper = device.mac.upper().replace("-", ":")
         now = time.time()
         candidates = self._topology.get(mac_upper, {})
 
-        # 1. Fresh RSSI candidates (< 5 min)
-        valid_candidates: list[tuple[str, int]] = []
-        for node, info in candidates.items():
-            if node in available and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT:
-                valid_candidates.append((node, info.get("rssi", -100)))
-        if valid_candidates:
-            valid_candidates.sort(key=lambda x: x[1], reverse=True)
-            return valid_candidates[0][0]
-
-        # 2. Historical RSSI candidates (stationary wall-mounted shutters/relays)
-        hist_candidates: list[tuple[str, int]] = [
+        # 1. Fresh direct RSSI
+        fresh = [
             (node, info.get("rssi", -100))
             for node, info in candidates.items()
-            if node in available and "rssi" in info
+            if node in available and "rssi" in info and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT
         ]
-        if hist_candidates:
-            hist_candidates.sort(key=lambda x: x[1], reverse=True)
-            return hist_candidates[0][0]
+        if fresh:
+            return max(fresh, key=lambda x: x[1])[0]
 
-        # 3. Physical room adjacency map from primary / affinity node
-        ref_node = exclude_node or aff_node
-        if ref_node and ref_node in NODE_ADJACENCY_MAP:
-            for neighbor in NODE_ADJACENCY_MAP[ref_node]:
-                if neighbor in available:
-                    return neighbor
+        # 2. Historical direct RSSI
+        hist = [(node, info.get("rssi", -100)) for node, info in candidates.items() if node in available and "rssi" in info]
+        if hist:
+            return max(hist, key=lambda x: x[1])[0]
 
-        if "esp32_bluetooth_proxy_18264c" in available:
-            return "esp32_bluetooth_proxy_18264c"
-        return available[0]
+        # 3. Best view of the mesh, then first available
+        mesh_scores: dict[str, int] = {}
+        for _dev_mac, nodes in self._topology.items():
+            for node, info in nodes.items():
+                if node in available and "rssi" in info and (now - info.get("last_seen", 0)) < TOPOLOGY_STALE_TIMEOUT:
+                    mesh_scores[node] = max(mesh_scores.get(node, -100), info.get("rssi", -100))
+        if mesh_scores:
+            return max(mesh_scores.items(), key=lambda x: x[1])[0]
+        return sorted(available)[0]
 
     async def async_dispatch_click(
         self,

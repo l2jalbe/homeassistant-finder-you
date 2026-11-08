@@ -44,6 +44,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL_SECONDS,
     DOMAIN,
 )
+from .routing_map import FILE_NAME as ROUTING_MAP_FILE, CustomRoutingMap
 from .topology import FinderTopologyRouter
 
 
@@ -107,7 +108,7 @@ BLE_DIMMER_CONFIRMATION_TIMEOUT = 4.5  # seconds (dimmers have a 1.0-3.5s fade r
 BLE_GROUP_STAGGER_TIMEOUT = 1.2  # max seconds to hold _ble_switch_lock waiting for ACK before next group light
 BLE_POST_ACK_QUIET_GAP = 0.20  # quiet air gap after ACK so mesh repeaters (0x4x) finish before next proxy TX
 BLE_MIN_INTER_TX_GAP = 0.35  # minimum gap between consecutive local BLE transmissions
-BLE_SHUTTER_ACK_TIMEOUT = 3.5  # seconds (shutters emit initial motor-start BLE packet in ~1.0s)
+BLE_SHUTTER_ACK_TIMEOUT = 2.0  # seconds (shutters emit the motor-start BLE packet in ~1.0s; mesh relay adds ~0.1s)
 DEFAULT_SHUTTER_FULL_TRAVEL_SECONDS = 25.0  # fallback if relay Ch1T1/Ch1T2 not yet loaded
 SHUTTER_TRAVEL_GUARD_OFFSET = 5.0  # fixed +5s safety margin added to (T_max * delta)
 
@@ -203,6 +204,8 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._shutter_active_tasks: dict[str, asyncio.Task] = {}
         self._consecutive_update_failures: int = 0
         self._topology_router = FinderTopologyRouter(hass, coordinator=self)
+        # User-editable "first ESP32 to try" per shutter (see ROUTING.md)
+        self.routing_map = CustomRoutingMap(hass.config.path(ROUTING_MAP_FILE))
         self._topology_router.start()
 
     def is_channel_syncing(self, device_uuid: str, channel: int) -> bool:
@@ -419,6 +422,19 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         shutter_durations = extract_shutter_durations(plant_payload)
         if shutter_durations:
             self._shutter_durations.update(shutter_durations)
+
+        # Keep /config/finder_you_mappa_personalizzata.yaml in sync (create it,
+        # add new shutters, refresh the list of ESP32 nodes, reload edits).
+        if self._shutters:
+            self._topology_router._discover_registered_nodes()
+            try:
+                await self.hass.async_add_executor_job(
+                    self.routing_map.sync,
+                    [(sh.name, sh.uuid) for sh in self._shutters],
+                    list(self._topology_router.esphome_nodes),
+                )
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.warning("Routing map sync failed: %s", err)
 
         cloud_states = extract_channel_states(plant_payload)
         now = time.time()
@@ -905,6 +921,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                 ack_evt = asyncio.Event()
                 self._shutter_ack_events[shutter_uuid] = ack_evt
                 dual_dispatched = False
+                ble_t0 = time.monotonic()
 
                 try:
                     if await self._topology_router.async_dispatch_set_percent(ble_dev, percent, preferred_node=primary_node):
@@ -919,7 +936,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                                     return
                                 self._shutter_ble_confirmed[shutter_uuid] = True
                                 self._last_successful_command_ts = time.time()
-                                _LOGGER.info("Local BLE shutter command %d%% acknowledged by %s", percent, shutter_uuid)
+                                self._log_ble_ack(shutter_uuid, percent, ble_t0, primary_node)
                                 return
                             except asyncio.TimeoutError:
                                 if self._shutter_cmd_seq.get(shutter_uuid) != seq:
@@ -941,7 +958,9 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                                 return
                             self._shutter_ble_confirmed[shutter_uuid] = True
                             self._last_successful_command_ts = time.time()
-                            _LOGGER.info("Local BLE shutter command %d%% acknowledged by %s", percent, shutter_uuid)
+                            self._log_ble_ack(
+                                shutter_uuid, percent, ble_t0, primary_node + (f"+{alt_node}" if dual_dispatched else "")
+                            )
                             return
                         except asyncio.TimeoutError:
                             if self._shutter_cmd_seq.get(shutter_uuid) != seq:
@@ -964,12 +983,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                                             return
                                         self._shutter_ble_confirmed[shutter_uuid] = True
                                         self._last_successful_command_ts = time.time()
-                                        _LOGGER.info(
-                                            "Local BLE shutter command %d%% acknowledged by %s via alternate proxy '%s'",
-                                            percent,
-                                            shutter_uuid,
-                                            alt_node,
-                                        )
+                                        self._log_ble_ack(shutter_uuid, percent, ble_t0, f"{alt_node} (alternate)")
                                         return
                                     except asyncio.TimeoutError:
                                         if self._shutter_cmd_seq.get(shutter_uuid) != seq:
@@ -1682,6 +1696,20 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             self.async_set_updated_data(self.data)
 
     @callback
+    def _log_ble_ack(self, shutter_uuid: str, percent: int, t0: float, node: str | None) -> None:
+        """Log how long the shutter took to confirm a BLE command and how."""
+        ms = (time.monotonic() - t0) * 1000
+        via = self._topology_router.last_frame_source.get(shutter_uuid, "?")
+        name = next((s.name.strip() for s in self._shutters if s.uuid == shutter_uuid), shutter_uuid)
+        _LOGGER.info(
+            "Local BLE shutter command %d%% acknowledged by %s in %.0f ms (sent via '%s', confirmation %s)",
+            percent,
+            name,
+            ms,
+            node,
+            via,
+        )
+
     def handle_ble_shutter_motion(self, device_uuid: str, motion: str | None) -> None:
         """Record the live motor state reported by a 13S2 status frame."""
         prev = self._shutter_motion.get(device_uuid)
