@@ -443,8 +443,7 @@ async def _press(hass, sup, frame, seq, movers, direction):
     await hass.async_block_till_done()
 
 
-async def _teach(hass, sup):
-    seq = 1
+async def _teach(hass, sup, seq=1):
     for _ in range(2):
         await _press(hass, sup, CMD_CLOSE, seq, [SALA_DX, SALA_SX, INGRESSO], "close"); seq += 1
         await _press(hass, sup, CMD_OPEN, seq, [SALA_DX, SALA_SX, INGRESSO], "open"); seq += 1
@@ -515,17 +514,23 @@ async def test_superseded_command_not_corrected(hass, tmp_path):
     assert (SALA_SX, 100) not in calls  # the superseded 'apri' is never applied
 
 
-async def test_correction_disabled_or_excluded_in_map(hass, tmp_path):
+async def test_correction_disabled_or_member_excluded(hass, tmp_path):
     c, sup = _sup_coord(hass, tmp_path)
     seq = await _teach(hass, sup)
-    c.routing_map._group_raw = {"0B0000": {"correzione": "no"}}
+    sup.set_correction_enabled("0B0000", False)
     c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0}
     await _press(hass, sup, CMD_OPEN, seq, [SALA_DX, INGRESSO], "open")
     c.async_set_position.assert_not_called()
-    c.routing_map._group_raw = {"0B0000": {"correzione": "si", "esclusi": ["Sala finestra sx"]}}
+    sup.set_correction_enabled("0B0000", True)
+    sup.set_member_included("0B0000", SALA_SX, False)
     c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0}
     await _press(hass, sup, CMD_OPEN, seq + 1, [SALA_DX, INGRESSO], "open")
     c.async_set_position.assert_not_called()
+    sup.set_member_included("0B0000", SALA_SX, True)
+    c.data = {SALA_DX: 0, SALA_SX: 0, INGRESSO: 0}
+    await _press(hass, sup, CMD_OPEN, seq + 2, [SALA_DX, INGRESSO], "open")
+    c.async_set_position.assert_awaited_once_with(SALA_SX, 100)
+    assert sup.corrections("0B0000") == 1
 
 
 async def test_ha_commanded_shutter_not_learned_nor_corrected(hass, tmp_path):
@@ -535,25 +540,14 @@ async def test_ha_commanded_shutter_not_learned_nor_corrected(hass, tmp_path):
     assert SALA_SX not in sup._groups["0B0000"]["members"]
 
 
-def test_routing_map_groups_section_roundtrip(tmp_path):
+def test_routing_map_has_no_groups_and_drops_legacy_section(tmp_path):
     p = tmp_path / "m.yaml"
+    p.write_text('tapparelle:\n  "Lavanderia": finder_ble_1\n\ngruppi:\n  "0B0000":\n    correzione: si\n')
     m = CustomRoutingMap(str(p))
-    groups = {"0B0000": {"membri": ["Sala finestra dx", "Sala finestra sx"], "codici": {"09": "apri", "11": "chiudi"}, "osservazioni": 4}}
-    m.sync(SHUTTERS, ["finder_ble_1"], groups)
+    m.sync(SHUTTERS, ["finder_ble_1"])
     text = p.read_text()
-    assert 'gruppi:' in text and '"0B0000":' in text and 'correzione: si' in text
-    assert 'codici: {"09": apri, "11": chiudi}' in text
-    text = text.replace('nome: ""', 'nome: "Pulsante sala"').replace("correzione: si", "correzione: no")
-    p.write_text(text)
-    import os, time as _t
-    os.utime(p, (_t.time() + 5, _t.time() + 5))
-    m.sync(SHUTTERS, ["finder_ble_1"], groups)
-    st = m.group_settings("0B0000")
-    assert st["enabled"] is False and st["name"] == "Pulsante sala"
-    groups["0B0000"]["osservazioni"] = 5   # learning progresses -> file rewritten, user values kept
-    m.sync(SHUTTERS, ["finder_ble_1"], groups)
-    text = p.read_text()
-    assert 'nome: "Pulsante sala"' in text and "correzione: no" in text and "osservazioni: 5" in text
+    assert "\ngruppi:" not in text
+    assert '"Lavanderia": finder_ble_1' in text
 
 
 async def test_topology_forwards_command_frames(hass, tmp_path):
@@ -593,3 +587,134 @@ def test_note_motion_records_only_starts(hass):
     sup.note_motion("u", None)
     sup.note_motion("u", "closing")
     assert sup._motion_start["u"][0] >= t1
+
+
+
+# --- v0.3.0: signal tracker, scenes device, group devices --------------------
+
+from custom_components.finder_you.signal_tracker import SignalTracker  # noqa: E402
+
+
+def test_signal_tracker_average_and_reception():
+    t = SignalTracker()
+    assert t.reception("u") is None and t.rssi("u") is None
+    assert t.note_relay("u", "05:61:03:20:F2:3E", now=1000) is True
+    assert t.reception("u", now=1000) == "solo_mesh"
+    assert t.note_direct("u", "finder_ble_1", -70, now=1001) is True   # first value published at once
+    assert t.rssi("u") == -70 and t.reception("u", now=1001) == "diretta"
+    assert t.note_direct("u", "finder_ble_1", -80, now=1010) is False  # held (< 60 s)
+    t.note_direct("u", "finder_ble_1", -90, now=1020)
+    assert t.flush(now=1030) is False
+    assert t.flush(now=1062) is True
+    assert t.rssi("u") == -85
+    attrs = t.attributes("u")
+    assert attrs["esp32_migliore"] == "finder_ble_1" and attrs["rssi_per_esp32"] == {"finder_ble_1": -90}
+
+
+async def test_topology_feeds_signal_tracker(hass):
+    c, r = _router_with_shutter(hass)
+    r._process_finder_adv_bytes(REPEATER, -88, _relay(F_STOP61), "finder_ble_1", "finder_ble_1")
+    assert c.signal_tracker.reception(UUID) == "solo_mesh"
+    r._process_finder_adv_bytes(DIRECT, -72, _hx(F_STOP100), "finder_ble_1", "finder_ble_1")
+    assert c.signal_tracker.reception(UUID) == "diretta"
+    assert c.signal_tracker.rssi(UUID) == -72
+
+
+async def test_stale_scenario_devices_removed(hass):
+    from homeassistant.helpers import device_registry as dr
+    from custom_components.finder_you import _async_remove_stale_devices
+
+    entry = MockConfigEntry(domain=DOMAIN, data={"email": "a@b.c", "password": "x"})
+    entry.add_to_hass(hass)
+    reg = dr.async_get(hass)
+    old = reg.async_get_or_create(config_entry_id=entry.entry_id, identifiers={(DOMAIN, "scenario_abc")}, name="Apri sala")
+    shutter = reg.async_get_or_create(config_entry_id=entry.entry_id, identifiers={(DOMAIN, SALA_SX)}, name="Sala finestra sx")
+    _async_remove_stale_devices(hass, entry)
+    assert reg.async_get(old.id) is None
+    assert reg.async_get(shutter.id) is not None  # never touched
+
+
+async def test_scene_entities_share_one_device(hass):
+    from custom_components.finder_you.api.plant import Scenario
+    from custom_components.finder_you.scene import FinderYouScene
+
+    c = _coord(hass, True)
+    a = FinderYouScene(c, Scenario(uuid="s1", name="Apri sala"))
+    b = FinderYouScene(c, Scenario(uuid="s2", name="Chiudi Sala"))
+    assert a.device_info["identifiers"] == b.device_info["identifiers"] == {(DOMAIN, "scenarios_a@b.c")}
+    assert a.unique_id == "finder_you_scenario_s1"  # entity_ids preserved
+
+
+async def test_group_entities_created_dynamically_and_forget(hass, tmp_path):
+    from homeassistant.helpers import device_registry as dr
+    from custom_components.finder_you.group_entities import (
+        async_setup_group_entities, button_factory, sensor_factory, switch_factory,
+    )
+
+    c, sup = _sup_coord(hass, tmp_path)
+    entry = MockConfigEntry(domain=DOMAIN, data={"email": "a@b.c", "password": "x"})
+    entry.add_to_hass(hass)
+    added = []
+    for f in (switch_factory, sensor_factory, button_factory):
+        async_setup_group_entities(hass, entry, c, lambda ents: added.extend(ents), f)
+    assert added == []  # nothing learned yet
+    await _teach(hass, sup)
+    await hass.async_block_till_done()
+    names = sorted(e.name for e in added)
+    assert names == sorted([
+        "Correzione automatica", "Includi Sala finestra dx", "Includi Sala finestra sx",
+        "Includi Portafinestra ingresso", "Correzioni", "Osservazioni", "Dimentica gruppo",
+    ])
+    sw = next(e for e in added if e.name == "Includi Sala finestra sx")
+    sw.hass = hass
+    sw.async_write_ha_state = lambda: None
+    await sw.async_turn_off()
+    assert sup.member_included("0B0000", SALA_SX) is False
+    # forget -> device removed, entities re-created if learned again
+    reg = dr.async_get(hass)
+    reg.async_get_or_create(config_entry_id=entry.entry_id, identifiers={(DOMAIN, "group_0B0000")}, name="Gruppo Finder 0B0000")
+    btn = next(e for e in added if e.name == "Dimentica gruppo")
+    await btn.async_press()
+    await hass.async_block_till_done()
+    assert reg.async_get_device(identifiers={(DOMAIN, "group_0B0000")}) is None
+    assert sup.known_groups() == []
+    added.clear()
+    await _teach(hass, sup, seq=20)
+    await hass.async_block_till_done()
+    assert len(added) == 7
+
+
+async def test_group_label_uses_device_rename(hass, tmp_path):
+    from homeassistant.helpers import device_registry as dr
+
+    c, sup = _sup_coord(hass, tmp_path)
+    entry = MockConfigEntry(domain=DOMAIN, data={"email": "a@b.c", "password": "x"})
+    entry.add_to_hass(hass)
+    reg = dr.async_get(hass)
+    dev = reg.async_get_or_create(config_entry_id=entry.entry_id, identifiers={(DOMAIN, "group_0B0000")}, name="Gruppo Finder 0B0000")
+    assert sup.label("0B0000") == "Gruppo Finder 0B0000"
+    reg.async_update_device(dev.id, name_by_user="Pulsante sala")
+    assert sup.label("0B0000") == "Pulsante sala"
+
+
+async def test_full_entry_setup_smoke(hass, tmp_path):
+    """Whole integration loads with all platforms (cloud mocked)."""
+    from custom_components.finder_you.coordinator import FinderYouCoordinator
+
+    entry = MockConfigEntry(domain=DOMAIN, data={"email": "a@b.c", "password": "x"},
+                            options={CONF_STABLE_SESSION: True})
+    entry.add_to_hass(hass)
+
+    async def fake_update(self):
+        self._shutters = [_shutter(SALA_SX, "Sala finestra sx")]
+        return {SALA_SX: 100}
+
+    with _patch.object(FinderYouCoordinator, "_async_update_data", fake_update):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    states = {s.entity_id: s.state for s in hass.states.async_all()}
+    assert any(e.startswith("cover.") for e in states)
+    assert "sensor.sala_finestra_sx_segnale_ble" in states
+    assert any(e.startswith("sensor.sala_finestra_sx_") and ("reception" in e or "ricezione" in e) for e in states)
+    assert any("cloud_reconnections" in e for e in states)
+    assert await hass.config_entries.async_unload(entry.entry_id)

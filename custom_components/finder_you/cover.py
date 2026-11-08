@@ -33,6 +33,22 @@ async def async_setup_entry(
     async_add_entities(FinderYouCover(coordinator, shutter) for shutter in coordinator.shutters)
 
 
+def shutter_device_info(coordinator: FinderYouCoordinator, shutter: Shutter) -> DeviceInfo:
+    """Device of a shutter (shared by the cover and its diagnostic sensors)."""
+    connections = set()
+    ble_dev = coordinator.ble_inventory.get(shutter.uuid)
+    if ble_dev and ble_dev.mac:
+        connections.add((dr.CONNECTION_BLUETOOTH, ble_dev.mac.lower()))
+    return DeviceInfo(
+        identifiers={(DOMAIN, shutter.uuid)},
+        connections=connections,
+        name=shutter.name,
+        manufacturer="Finder",
+        model="YESLY Roller Shutter",
+        suggested_area=shutter.room,
+    )
+
+
 class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, RestoreEntity):
     _attr_has_entity_name = True
     _attr_device_class = CoverDeviceClass.SHUTTER
@@ -51,19 +67,7 @@ class FinderYouCover(CoordinatorEntity[FinderYouCoordinator], CoverEntity, Resto
         self._attr_unique_id = f"{DOMAIN}_{shutter.uuid}"
         self._attr_name = None
 
-        connections = set()
-        ble_dev = coordinator.ble_inventory.get(shutter.uuid)
-        if ble_dev and ble_dev.mac:
-            connections.add((dr.CONNECTION_BLUETOOTH, ble_dev.mac.lower()))
-
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, shutter.uuid)},
-            connections=connections,
-            name=shutter.name,
-            manufacturer="Finder",
-            model="YESLY Roller Shutter",
-            suggested_area=shutter.room,
-        )
+        self._attr_device_info = shutter_device_info(coordinator, shutter)
         self._last_commanded_position: int | None = None
 
     async def async_added_to_hass(self) -> None:

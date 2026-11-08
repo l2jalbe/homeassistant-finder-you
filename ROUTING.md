@@ -46,7 +46,8 @@ Gestita da `routing_map.py`.
 - Viene **creata da sola** al primo avvio con tutte le tapparelle a `auto` e con
   un commento iniziale che spiega come compilarla.
 - Si aggiorna da sola quando compaiono nuove tapparelle o cambia l'elenco
-  degli ESP32 rilevati (riga `# ESP32 rilevati: ...`). I valori scritti
+  degli ESP32 rilevati (riga `# ESP32 rilevati: ...`). Contiene solo la sezione
+  `tapparelle:` (la sezione `gruppi:` della v0.2.0 viene rimossa da sola). I valori scritti
   dall'utente vengono sempre conservati, i commenti aggiunti a mano no.
 - Le modifiche vengono rilette alla lettura periodica (entro ~2 min con la
   sessione stabile) o subito ricaricando l'integrazione.
@@ -108,10 +109,16 @@ le tapparelle comandate da HA negli stessi secondi sono ignorate (né apprese n�
 corrette). Solo gli *avvii* del motore contano: una tapparella che continua a
 muoversi nella vecchia direzione dopo aver perso il comando viene corretta.
 
-Impostazioni per gruppo nella sezione `gruppi:` della mappa personalizzata
-(`nome`, `correzione: si/no`, `esclusi: [...]`); `membri`, `codici` e
-`osservazioni` sono informativi e aggiornati da soli. Il sensore diagnostico
-**Group corrections** conta i recuperi e mostra i gruppi appresi negli attributi.
+Le impostazioni si gestiscono da Home Assistant: ogni gruppo noto è un
+dispositivo **"Gruppo Finder `<codice>`"** (`group_entities.py`) con
+l'interruttore **Correzione automatica**, un interruttore **Includi
+`<tapparella>`** per ogni membro, i sensori **Correzioni** e **Osservazioni**
+(membri e codici negli attributi) e il pulsante **Dimentica gruppo**.
+Rinominando il dispositivo si dà un nome al gruppo (usato anche nei log). I
+dispositivi compaiono da soli quando un gruppo diventa noto o acquisisce un
+membro (segnale dispatcher `finder_you_groups_updated`). Impostazioni e dati
+appresi stanno in `.storage/finder_you_groups`. Il sensore **Group
+corrections** del gateway conta i recuperi totali.
 
 ## Regole dell'autore originale (rimosse)
 
@@ -122,6 +129,22 @@ chiave stanza → ESP32 (`_get_affinity_node` e l'alias map in
 `_resolve_esphome_node`). Non si attivavano con altri nomi di ESP32 e sono state
 rimosse nella v0.1.4. Il codice originale è nella cronologia git al commit
 `bb921a6` (`git show bb921a6:custom_components/finder_you/topology.py`).
+
+## Diagnostica del segnale (`signal_tracker.py`)
+
+Ogni frame di stato **diretto** aggiunge un campione RSSI (per ESP32); ogni
+frame **rilanciato** aggiorna l'ultima ricezione via mesh. Il sensore
+**Segnale BLE** pubblica la media dei campioni al massimo una volta al minuto
+(storico leggero); **Ricezione** vale *diretta* se la tapparella è stata sentita
+direttamente negli ultimi 7 giorni, altrimenti *solo_mesh*.
+
+## Nodo ESP32 (`esphome/`)
+
+`finder-ble-1.yaml` + `finder_relay.h`: il nodo inoltra ogni advertising Finder
+come evento `esphome.finder_ble_adv` scartando solo i frame identici dallo
+stesso mittente entro 2,5 s (il componente originale limitava a 1 evento/s per
+MAC e perdeva i frame dei gateway). Un ripetitore radio dei comandi da 15 byte
+è stato provato (firmware v2) e rimosso: non riduceva i comandi persi.
 
 ## Frame BLE Finder utili da ricordare (13S2)
 

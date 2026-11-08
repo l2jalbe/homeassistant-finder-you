@@ -19,6 +19,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .api import Switch
 from .const import DOMAIN
 from .coordinator import FinderYouCoordinator
+from .group_entities import async_setup_group_entities, switch_factory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ async def async_setup_entry(
     async_add_entities(
         FinderYouSwitch(coordinator, switch) for switch in coordinator.switches
     )
+    # Learned button/scenario groups: correction + member switches
+    async_setup_group_entities(hass, entry, coordinator, async_add_entities, switch_factory)
 
 
 class FinderYouSwitch(CoordinatorEntity[FinderYouCoordinator], SwitchEntity, RestoreEntity):

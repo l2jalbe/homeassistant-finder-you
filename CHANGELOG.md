@@ -2,6 +2,18 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.3.0] - 2026-11-08
+
+### Aggiunto
+- **Gruppi in Home Assistant**: ogni gruppo di pulsante/scenario appreso è un dispositivo "Gruppo Finder `<codice>`" con interruttore *Correzione automatica*, un interruttore *Includi `<tapparella>`* per ogni membro, sensori *Correzioni* e *Osservazioni*, pulsante *Dimentica gruppo* (nuova piattaforma `button`). Le entità compaiono da sole quando un gruppo viene appreso; il nome si dà rinominando il dispositivo.
+- **Segnale BLE** (dBm, media al minuto, con storico) e **Ricezione** (diretta / solo via mesh) su ogni dispositivo tapparella (`signal_tracker.py`).
+- Configurazione del nodo ESP32 nel repository: `esphome/finder-ble-1.yaml` e `esphome/finder_relay.h` (inoltro senza limite per MAC, contatore comandi, ottimizzazioni per ESP32 rev 3.1).
+
+### Modificato
+- Tutti gli scenari raggruppati nel dispositivo **"Scenari Finder YOU"** (prima un dispositivo per scenario); `entity_id` invariati, i vecchi dispositivi vuoti vengono rimossi all'avvio.
+- Impostazioni dei gruppi salvate in HA (`.storage/finder_you_groups`) invece che nel file YAML; la sezione `gruppi:` di `finder_you_mappa_personalizzata.yaml` viene rimossa automaticamente.
+- README e ROUTING.md aggiornati.
+
 ## [0.2.0] - 2026-11-08
 
 ### Aggiunto

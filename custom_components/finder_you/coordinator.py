@@ -11,6 +11,7 @@ import time
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import (
@@ -45,6 +46,7 @@ from .const import (
     DOMAIN,
 )
 from .group_supervisor import GroupSupervisor
+from .signal_tracker import PUBLISH_INTERVAL as SIGNAL_PUBLISH_INTERVAL, SignalTracker
 from .routing_map import FILE_NAME as ROUTING_MAP_FILE, CustomRoutingMap
 from .topology import FinderTopologyRouter
 
@@ -209,6 +211,11 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self.routing_map = CustomRoutingMap(hass.config.path(ROUTING_MAP_FILE))
         # Learns button/scenario groups and recovers shutters that miss them
         self.group_supervisor = GroupSupervisor(hass, self)
+        # Per-shutter BLE reception stats ("Segnale BLE" / "Ricezione" sensors)
+        self.signal_tracker = SignalTracker()
+        self._unsub_signal_flush = async_track_time_interval(
+            hass, self._async_flush_signal, timedelta(seconds=SIGNAL_PUBLISH_INTERVAL)
+        )
         self._topology_router.start()
 
     def is_channel_syncing(self, device_uuid: str, channel: int) -> bool:
@@ -435,7 +442,6 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
                     self.routing_map.sync,
                     [(sh.name, sh.uuid) for sh in self._shutters],
                     list(self._topology_router.esphome_nodes),
-                    self.group_supervisor.summary(),
                 )
             except Exception as err:  # noqa: BLE001
                 _LOGGER.warning("Routing map sync failed: %s", err)
@@ -1715,6 +1721,11 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             via,
         )
 
+    @callback
+    def _async_flush_signal(self, _now=None) -> None:
+        if self.signal_tracker.flush():
+            self.async_update_listeners()
+
     def handle_ble_shutter_motion(self, device_uuid: str, motion: str | None) -> None:
         """Record the live motor state reported by a 13S2 status frame."""
         self.group_supervisor.note_motion(device_uuid, motion)
@@ -1979,6 +1990,9 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._shutter_guard_timers.clear()
         self._topology_router.stop()
         self.group_supervisor.async_stop()
+        if self._unsub_signal_flush:
+            self._unsub_signal_flush()
+            self._unsub_signal_flush = None
         if self._client:
             await self._client.close()
             self._client = None

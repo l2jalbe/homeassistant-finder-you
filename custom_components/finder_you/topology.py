@@ -434,6 +434,14 @@ class FinderTopologyRouter:
                     if repeater_mac
                     else f"direct via '{source_label}'"
                 )
+                tracker = getattr(self._coordinator, "signal_tracker", None)
+                if tracker is not None:
+                    if repeater_mac:
+                        changed = tracker.note_relay(matched_dev.uuid, repeater_mac, now)
+                    else:
+                        changed = tracker.note_direct(matched_dev.uuid, node or source_label, rssi, now)
+                    if changed:
+                        self._coordinator.async_update_listeners()
                 fam = (matched_dev.family or "").upper()
                 is_dimmer = any(k in fam for k in ["1521", "1571"])
                 is_shutter = any(k in fam for k in ["13S2", "SHUTTER"])

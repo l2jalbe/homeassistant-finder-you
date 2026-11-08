@@ -23,8 +23,10 @@ Safety rules: never for unknown codes, never if no member moved, never if
 the shutter is already at the target, one correction per command, aborted
 when a newer command of the same group arrives, shutters commanded by HA
 around the same time are ignored. Per-group settings (name, on/off,
-excluded shutters) live in the user routing map file (routing_map.py).
-See ROUTING.md.
+excluded shutters) are stored with the learned data in HA storage and
+exposed as entities on one device per known group ("Gruppo Finder <id>"):
+switch "Correzione automatica", one switch "Includi <tapparella>" per
+member, sensors and a "Dimentica gruppo" button. See ROUTING.md.
 """
 
 from __future__ import annotations
@@ -35,14 +37,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.storage import Store
+
+from .const import DOMAIN
 
 if TYPE_CHECKING:
     from .coordinator import FinderYouCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
+SIGNAL_GROUPS_UPDATED = "finder_you_groups_updated"
 STORAGE_KEY = "finder_you_groups"
 STORAGE_VERSION = 1
 
@@ -170,6 +177,62 @@ class GroupSupervisor:
             async_call_later(self.hass, LEARN_WINDOW_S, callback(lambda _t: self._async_learn(obs)))
         )
 
+    # ---- user settings (entities) -------------------------------------------
+
+    def _settings(self, group_id: str) -> dict[str, Any]:
+        g = self._groups.setdefault(group_id, {"obs": 0, "members": {}, "codes": {}})
+        return g.setdefault("settings", {"enabled": True, "excluded": []})
+
+    def correction_enabled(self, group_id: str) -> bool:
+        return bool(self._groups.get(group_id, {}).get("settings", {}).get("enabled", True))
+
+    def member_included(self, group_id: str, uuid: str) -> bool:
+        return uuid not in self._groups.get(group_id, {}).get("settings", {}).get("excluded", [])
+
+    @callback
+    def set_correction_enabled(self, group_id: str, enabled: bool) -> None:
+        self._settings(group_id)["enabled"] = bool(enabled)
+        self._save()
+
+    @callback
+    def set_member_included(self, group_id: str, uuid: str, included: bool) -> None:
+        excluded = self._settings(group_id)["excluded"]
+        if included and uuid in excluded:
+            excluded.remove(uuid)
+        elif not included and uuid not in excluded:
+            excluded.append(uuid)
+        self._save()
+
+    def corrections(self, group_id: str) -> int:
+        return int(self._groups.get(group_id, {}).get("corrections", 0))
+
+    def known_groups(self) -> list[str]:
+        return [gid for gid in sorted(self._groups) if self.is_known(gid)]
+
+    def label(self, group_id: str) -> str:
+        """Group name as shown in HA (device name, user rename included)."""
+        dev = dr.async_get(self.hass).async_get_device(identifiers={(DOMAIN, f"group_{group_id}")})
+        if dev is not None:
+            return dev.name_by_user or dev.name or group_id
+        return group_id
+
+    @callback
+    def forget(self, group_id: str) -> None:
+        """Drop everything learned about a group (and its device)."""
+        self._groups.pop(group_id, None)
+        self._active.pop(group_id, None)
+        reg = dr.async_get(self.hass)
+        dev = reg.async_get_device(identifiers={(DOMAIN, f"group_{group_id}")})
+        if dev is not None:
+            reg.async_remove_device(dev.id)
+        self._save()
+        self._notify()
+        _LOGGER.info("Forgot group %s", group_id)
+
+    @callback
+    def _notify(self) -> None:
+        async_dispatcher_send(self.hass, SIGNAL_GROUPS_UPDATED)
+
     # ---- learned model ---------------------------------------------------
 
     def _movers(self, obs: _Observation, until: float) -> dict[str, str]:
@@ -235,6 +298,7 @@ class GroupSupervisor:
         real = {u: d for u, d in movers.items() if d}
         if not real:
             return
+        before = (self.is_known(obs.group_id), tuple(sorted(self.members(obs.group_id))))
         g = self._groups.setdefault(obs.group_id, {"obs": 0, "members": {}, "codes": {}})
         g["obs"] = int(g.get("obs", 0)) + 1
         for uuid in movers:
@@ -252,13 +316,17 @@ class GroupSupervisor:
             g["obs"],
         )
         self._save()
+        after = (self.is_known(obs.group_id), tuple(sorted(self.members(obs.group_id))))
+        if after != before:
+            self._notify()
+        else:
+            self._coordinator.async_update_listeners()
 
     @callback
     def _async_correct(self, obs: _Observation) -> None:
         if obs.superseded or not self.is_known(obs.group_id):
             return
-        settings = self._coordinator.routing_map.group_settings(obs.group_id)
-        if not settings.get("enabled", True):
+        if not self.correction_enabled(obs.group_id):
             return
         direction = self.code_direction(obs.group_id, obs.code)
         if direction not in DIRECTION_TARGET:
@@ -267,10 +335,9 @@ class GroupSupervisor:
         movers = self._movers(obs, obs.ts + CORRECTION_DELAY_S + 0.5)
         if not any(d == direction for d in movers.values()):
             return  # no evidence the group command was executed: do nothing
-        excluded = settings.get("excluded", set())
         names = {s.uuid: s.name.strip() for s in self._coordinator.shutters}
         for uuid in self.members(obs.group_id):
-            if movers.get(uuid) == direction or names.get(uuid, "") in excluded:
+            if movers.get(uuid) == direction or not self.member_included(obs.group_id, uuid):
                 continue  # reacted the right way (a start the other way does not count)
             if time.time() - self._ha_cmd_ts.get(uuid, 0) < HA_COMMAND_GUARD_S:
                 continue
@@ -279,7 +346,9 @@ class GroupSupervisor:
                 continue  # already where the group wants it
             obs.corrected.add(uuid)
             self.corrections_total += 1
-            label = settings.get("name") or obs.group_id
+            g = self._groups[obs.group_id]
+            g["corrections"] = int(g.get("corrections", 0)) + 1
+            label = self.label(obs.group_id)
             _LOGGER.warning(
                 "Group '%s' %s: %s did not react within %.1fs - sending individual command %d%%",
                 label,
@@ -292,3 +361,4 @@ class GroupSupervisor:
             self.hass.async_create_task(self._coordinator.async_set_position(uuid, target))
         if obs.corrected:
             self._save()
+            self._coordinator.async_update_listeners()

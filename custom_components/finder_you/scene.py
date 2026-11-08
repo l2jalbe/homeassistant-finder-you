@@ -1,4 +1,10 @@
-"""Scene entity for each Finder YOU cloud scenario."""
+"""Scene entity for each Finder YOU cloud scenario.
+
+All scenes are grouped under ONE device ("Scenari Finder YOU") so they do not
+clutter the integration page next to the shutters. Entity unique_ids are
+unchanged, so existing entity_ids keep working; the old one-device-per-scene
+entries are removed at setup (see __init__._async_remove_stale_devices).
+"""
 
 from __future__ import annotations
 
@@ -27,6 +33,16 @@ async def async_setup_entry(
     )
 
 
+def scenarios_device_info(coordinator: FinderYouCoordinator) -> DeviceInfo:
+    """Single device holding every Finder YOU cloud scenario."""
+    return DeviceInfo(
+        identifiers={(DOMAIN, f"scenarios_{coordinator.account_id}")},
+        name="Scenari Finder YOU",
+        manufacturer="Finder",
+        model="Scenari cloud YESLY",
+    )
+
+
 class FinderYouScene(CoordinatorEntity[FinderYouCoordinator], Scene):
     """A cloud macro/scenario exposed as an HA scene."""
 
@@ -37,12 +53,7 @@ class FinderYouScene(CoordinatorEntity[FinderYouCoordinator], Scene):
         self._scenario = scenario
         self._attr_unique_id = f"{DOMAIN}_scenario_{scenario.uuid}"
         self._attr_name = scenario.name
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, f"scenario_{scenario.uuid}")},
-            name=scenario.name,
-            manufacturer="Finder",
-            model="YESLY Cloud Scenario",
-        )
+        self._attr_device_info = scenarios_device_info(coordinator)
 
     async def async_activate(self, **kwargs: Any) -> None:
         """Activate this scenario on the Finder YOU cloud."""

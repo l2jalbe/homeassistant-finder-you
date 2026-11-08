@@ -1,0 +1,157 @@
+# =============================================================================
+# Nodo ESP32 per tapparelle Finder YESLY (comandi BLE locali + telemetria)
+# Scheda: ESP32 DevKit (ESP32-WROOM-32, CP2102)
+#
+# Per il 2° e 3° ESP32: copia questo file come finder-ble-2.yaml / -3.yaml
+# e cambia SOLO le tre righe in "substitutions".
+# =============================================================================
+substitutions:
+  name: finder-ble-1
+  friendly_name: Finder BLE 1
+  # stanza/zona dove lo metti (solo descrittivo)
+  location: Centro casa
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  comment: "Bridge BLE Finder YESLY - ${location}"
+  # Estensioni locali: inoltro telemetria senza perdite + contatore comandi
+  # (file finder_relay.h nella stessa cartella di questo YAML)
+  includes:
+    - finder_relay.h
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+    # Ottimizzazioni suggerite da ESPHome per questo chip (ESP32 rev 3.1)
+    advanced:
+      flash_chip: generic
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret finder_ble_api_key
+  # Servizi chiamati dall'integrazione HA "finder_you" (fork francescodoffizi).
+  # I nomi devono restare questi: l'integrazione li cerca automaticamente.
+  actions:
+    - action: finder_mesh_click
+      variables:
+        mac: string
+        key: string
+        channel: int
+      then:
+        - lambda: |-
+            ESP_LOGI("finder", "click -> %s ch%d", mac.c_str(), (int) channel);
+            esphome::finder_yesly::send_finder_generic_click_hex(mac, key, (int) channel);
+
+    - action: finder_mesh_set_percent
+      variables:
+        mac: string
+        key: string
+        percent: int
+      then:
+        - lambda: |-
+            ESP_LOGI("finder", "set_percent -> %s %d%%", mac.c_str(), (int) percent);
+            esphome::finder_yesly::send_finder_generic_percent_hex(mac, key, (int) percent);
+
+    - action: finder_mesh_shutter_stop
+      variables:
+        mac: string
+        key: string
+        channel: int
+      then:
+        - lambda: |-
+            ESP_LOGI("finder", "stop -> %s ch%d", mac.c_str(), (int) channel);
+            esphome::finder_yesly::send_finder_generic_shutter_stop_hex(mac, key, (int) channel);
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Il Bluetooth condivide l'antenna col Wi-Fi: niente risparmio energetico
+  power_save_mode: none
+  ap:
+    ssid: "${name}-fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+# Componente Finder YESLY (versione con AES-CCM autonomo, ESPHome 2026.10+)
+external_components:
+  - source:
+      type: git
+      url: https://github.com/francescodoffizi/BLE_Finder_Yesly
+      ref: main
+    components: [finder_yesly]
+    refresh: 1d
+
+finder_yesly:
+
+# Ascolto passivo degli advertising Finder (MAC 05:61:*): inoltro a HA come
+# evento "esphome.finder_ble_adv" (stato tapparelle e comandi dei pulsanti)
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 320ms
+    window: 320ms
+    active: false
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            char addr_buf[18];
+            x.address_str_to(addr_buf);
+            if (strncmp(addr_buf, "05:61:", 6) != 0) return;
+            for (auto &mf : x.get_manufacturer_datas()) {
+              finder_relay::count_command(mf.data);
+              finder_relay::forward_adv(addr_buf, x.get_rssi(), mf.data);
+            }
+
+# Fa anche da proxy Bluetooth generico per HA (utile per altri dispositivi BLE)
+bluetooth_proxy:
+  active: true
+
+switch:
+  - platform: template
+    name: "Finder Telemetry Forwarding"
+    id: switch_finder_telemetry
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+    turn_on_action:
+      - lambda: finder_relay::g_forward_enabled = true;
+    turn_off_action:
+      - lambda: finder_relay::g_forward_enabled = false;
+
+  - platform: restart
+    name: "Riavvia"
+    entity_category: config
+
+sensor:
+  - platform: wifi_signal
+    name: "Segnale WiFi"
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+  # Comandi DIVERSI di pulsanti/scenari sentiti dall'avvio (copie escluse)
+  - platform: template
+    name: "Comandi Finder ricevuti"
+    icon: mdi:radio-tower
+    state_class: total_increasing
+    accuracy_decimals: 0
+    update_interval: 30s
+    entity_category: diagnostic
+    lambda: return finder_relay::s_cmd_unique_count;
+
+# Serve per il contatore anti-replay dei pacchetti Finder (basato sull'ora)
+time:
+  - platform: homeassistant
+    id: ha_time

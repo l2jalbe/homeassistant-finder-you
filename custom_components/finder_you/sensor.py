@@ -17,14 +17,18 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfTime
+from homeassistant.const import SIGNAL_STRENGTH_DECIBELS_MILLIWATT, EntityCategory, UnitOfTime
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .api import Shutter
+from .cover import shutter_device_info
 from .const import DOMAIN
 from .coordinator import FinderYouCoordinator
+from .group_entities import async_setup_group_entities, sensor_factory
+from .signal_tracker import RECEPTION_OPTIONS
 
 
 async def async_setup_entry(
@@ -42,6 +46,13 @@ async def async_setup_entry(
             GroupCorrectionsSensor(coordinator),
         ]
     )
+    # Per-shutter BLE diagnostics, attached to each shutter's device
+    async_add_entities(
+        [ShutterSignalSensor(coordinator, sh) for sh in coordinator.shutters]
+        + [ShutterReceptionSensor(coordinator, sh) for sh in coordinator.shutters]
+    )
+    # Learned button/scenario groups: corrections / observations sensors
+    async_setup_group_entities(hass, entry, coordinator, async_add_entities, sensor_factory)
 
 
 def gateway_device_info(coordinator: FinderYouCoordinator) -> DeviceInfo:
@@ -183,3 +194,49 @@ class GroupCorrectionsSensor(CoordinatorEntity[FinderYouCoordinator], SensorEnti
     @property
     def extra_state_attributes(self) -> dict:
         return {"gruppi": self.coordinator.group_supervisor.summary()}
+
+
+class ShutterSignalSensor(CoordinatorEntity[FinderYouCoordinator], SensorEntity):
+    """RSSI (dBm) of the shutter's DIRECT status frames, averaged per minute."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.SIGNAL_STRENGTH
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = SIGNAL_STRENGTH_DECIBELS_MILLIWATT
+    _attr_name = "Segnale BLE"
+
+    def __init__(self, coordinator: FinderYouCoordinator, shutter: Shutter) -> None:
+        super().__init__(coordinator)
+        self._uuid = shutter.uuid
+        self._attr_unique_id = f"{DOMAIN}_{shutter.uuid}_ble_rssi"
+        self._attr_device_info = shutter_device_info(coordinator, shutter)
+
+    @property
+    def native_value(self) -> int | None:
+        return self.coordinator.signal_tracker.rssi(self._uuid)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return self.coordinator.signal_tracker.attributes(self._uuid)
+
+
+class ShutterReceptionSensor(CoordinatorEntity[FinderYouCoordinator], SensorEntity):
+    """How the ESP32 nodes hear the shutter: directly or only via the mesh."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = RECEPTION_OPTIONS
+    _attr_translation_key = "reception"
+    _attr_icon = "mdi:access-point-network"
+
+    def __init__(self, coordinator: FinderYouCoordinator, shutter: Shutter) -> None:
+        super().__init__(coordinator)
+        self._uuid = shutter.uuid
+        self._attr_unique_id = f"{DOMAIN}_{shutter.uuid}_ble_reception"
+        self._attr_device_info = shutter_device_info(coordinator, shutter)
+
+    @property
+    def native_value(self) -> str | None:
+        return self.coordinator.signal_tracker.reception(self._uuid)

@@ -27,5 +27,16 @@
         "description": "Mantiene aperta una sola sessione cloud: nessuna riconnessione prima dei comandi e tolleranza ai timeout occasionali della lettura periodica. Attivala se i comandi funzionano solo subito dopo un riavvio del gateway (es. gateway 1Y.GU.005, impianti senza posizioni nel cloud)."
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "reception": {
+        "name": "Ricezione",
+        "state": {
+          "diretta": "Diretta",
+          "solo_mesh": "Solo via mesh"
+        }
+      }
+    }
   }
 }

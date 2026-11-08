@@ -1,136 +1,158 @@
 <img src="custom_components/finder_you/brand/icon.png" alt="Finder YOU" width="96" align="right">
 
-# Finder YOU (YESLY) per Home Assistant — fork con supporto gateway 1Y.GU.005 ed ESP32
+# Finder YOU (YESLY) per Home Assistant — fork con gateway 1Y.GU.005, ESP32 e recupero comandi
 
 Integrazione personalizzata per comandare le **tapparelle Finder YESLY (13S2)**
-da Home Assistant, tramite il cloud Finder YOU e, se presenti, uno o più
+da Home Assistant tramite il cloud Finder YOU e, soprattutto, tramite uno o più
 **ESP32 con ESPHome** che parlano direttamente in Bluetooth con gli attuatori.
 
-Questo repository è un fork di
+Fork di
 [`francescodoffizi/homeassistant-finder-you`](https://github.com/francescodoffizi/homeassistant-finder-you),
 a sua volta derivato da
 [`7AC/homeassistant-finder-you`](https://github.com/7AC/homeassistant-finder-you).
-Il fork nasce per far funzionare l'integrazione su un impianto con
-**gateway 1Y.GU.005** e per rendere la parte ESP32 utilizzabile su qualsiasi
-casa, non solo su quella dell'autore originale.
+Nasce per far funzionare l'integrazione su un impianto con **gateway
+1Y.GU.005**, renderla utilizzabile su qualsiasi casa e aggiungere funzioni che
+il sistema Finder non offre.
 
-> Versione attuale: **0.2.0** — dettagli in [CHANGELOG.md](CHANGELOG.md).
-
----
-
-## Cosa cambia rispetto al progetto originale
-
-### 1. Gateway 1Y.GU.005: sessione cloud stabile
-
-Su impianti con gateway **1Y.GU.005** il cloud Finder si comporta
-diversamente da quanto documentato in [PROTOCOL.md](PROTOCOL.md):
-
-- l'iscrizione all'impianto (`subscribe-plant`) risponde con 4 byte
-  (`10 01 40 03`) invece dello snapshot di stato;
-- `GetPlant` non contiene posizione né movimento delle tapparelle
-  (campi `#12`/`#13` assenti);
-- nessuna notifica push quando si usano i pulsanti a muro;
-- il gateway **resta legato alla prima sessione cloud**: dopo una
-  riconnessione i comandi vengono accettati dal cloud ma non eseguiti,
-  finché il gateway non viene riavviato.
-
-L'integrazione originale, non vedendo mai telemetria, si riconnetteva quasi a
-ogni comando e smetteva di funzionare dopo il primo. Questo fork aggiunge
-l'opzione **"Sessione cloud stabile"** (*Finder YOU → Configura*):
-
-- nessuna riconnessione preventiva, nessun "chiudi-riapri-riprova";
-- i timeout occasionali della lettura periodica non chiudono la sessione
-  (riconnessione solo dopo 3 fallimenti consecutivi o su errore di rete reale);
-- lettura periodica ogni 120 s.
-
-Inoltre: **stop anche senza ESP32** (invia la posizione stimata in base ai
-tempi di corsa) e il dispositivo diagnostico **"Gateway Finder YOU"** con il
-contatore **Cloud reconnections**.
-
-### 2. ESP32: stato in tempo reale e mesh YESLY
-
-Con uno o più ESP32 (firmware basato su
-[`francescodoffizi/BLE_Finder_Yesly`](https://github.com/francescodoffizi/BLE_Finder_Yesly))
-i comandi partono in Bluetooth locale e gli stati arrivano dalle tapparelle
-stesse, compresi i movimenti fatti dai **pulsanti a muro**.
-
-Novità di questo fork:
-
-- **Frame rilanciati dalla mesh decodificati.** I frame di stato ripetuti
-  dagli altri dispositivi YESLY non sono cifrati e contengono il MAC della
-  tapparella di origine: ora vengono usati invece di essere scartati. Un solo
-  ESP32 riceve così lo stato anche delle tapparelle che non sente direttamente.
-- **"In apertura" / "In chiusura"** mostrati in HA mentre il motore gira.
-- **Conferma BLE in 2 s** (prima 3,5 s) prima di ritentare da un altro ESP32 o
-  passare al cloud; nel log, per ogni comando, tempo di conferma e strada
-  (diretta o via mesh).
-- **Scelta dell'ESP32 solo in base al segnale**: rimosse le regole scritte per
-  la casa dell'autore originale (nomi dei suoi ESP32, stanze, MAC).
-- **Mappa personalizzata** `/config/finder_you_mappa_personalizzata.yaml`:
-  generata da sola con tutte le tapparelle a `auto`; scrivendo il nome di un
-  ESP32 al posto di `auto` quell'ESP32 viene provato per primo. Dettagli in
-  [ROUTING.md](ROUTING.md).
-- **Recupero dei comandi di gruppo**: quando un pulsante fisico o uno scenario
-  comanda più tapparelle e una non risponde, HA se ne accorge e le manda il
-  comando singolarmente. I gruppi vengono imparati da soli osservando quali
-  tapparelle si muovono; si gestiscono nella sezione `gruppi:` della mappa
-  personalizzata. Dettagli in [ROUTING.md](ROUTING.md).
-- Icona dell'integrazione (Home Assistant 2026.3+).
+> Versione attuale: **0.3.0** — dettagli in [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-## Installazione (HACS)
+## In breve
 
-1. HACS → ⋮ → **Repository personalizzati**
-2. URL: `https://github.com/l2jalbe/homeassistant-finder-you` — categoria **Integration**
-3. Scarica **Finder YOU** e riavvia Home Assistant
-4. *Impostazioni → Dispositivi e servizi → Aggiungi integrazione → Finder YOU*
-5. Email e password dell'app Finder YOU (l'account deve essere
-   **proprietario** dell'impianto; serve email + password, l'accesso con
-   Google non è supportato)
-6. Con gateway 1Y.GU.005: *Finder YOU → Configura* → attiva
-   **Sessione cloud stabile**
+| Funzione | Come |
+|---|---|
+| Comandi alle tapparelle | ESP32 in Bluetooth locale, cloud come riserva |
+| Stato in tempo reale (anche dai pulsanti a muro) | frame di stato BLE, diretti o rilanciati dalla mesh |
+| "In apertura" / "In chiusura" | byte del motore nei frame di stato |
+| Stop | BLE immediato; senza ESP32 posizione stimata via cloud |
+| Pulsanti e scenari che "perdono" una tapparella | **recupero automatico** dei gruppi appresi |
+| Qualità del segnale per tapparella | sensori **Segnale BLE** e **Ricezione** con storico |
+| Scenari dell'app Finder YOU | entità `scene.*` raccolte in un unico dispositivo |
+| Gateway 1Y.GU.005 | opzione **Sessione cloud stabile** |
 
-### Se i comandi non rispondono (gateway 1Y.GU.005)
+---
 
-Togli e rimetti l'alimentazione al gateway, aspetta 3 minuti, poi
-*Finder YOU → ⋮ → Ricarica*. Evita di tenere aperta l'app Finder YOU: il cloud
-gestisce un solo client attivo alla volta.
+## Cosa trovi in Home Assistant
 
-## ESP32 (opzionale, consigliato)
+**Per ogni tapparella** (dispositivo con il nome dell'app Finder YOU)
+- `cover.*` — apri, chiudi, stop, posizione, stato "in apertura/in chiusura"
+- **Segnale BLE** (dBm, diagnostica) — media al minuto del segnale con cui
+  l'ESP32 riceve direttamente la tapparella; nel grafico vedi l'andamento,
+  negli attributi l'ESP32 migliore e il valore per ogni ESP32
+- **Ricezione** (diagnostica) — *Diretta* oppure *Solo via mesh*: il modo più
+  rapido per individuare le tapparelle critiche
 
-- Scheda: ESP32 classico (ESP32-WROOM-32, `board: esp32dev`), ESPHome 2026.10+.
-- Configurazione d'esempio: componente `finder_yesly` di
-  [BLE_Finder_Yesly](https://github.com/francescodoffizi/BLE_Finder_Yesly)
-  come `external_components`, servizi `finder_mesh_click`,
-  `finder_mesh_set_percent`, `finder_mesh_shutter_stop` e inoltro degli
-  advertising Finder come evento `esphome.finder_ble_adv`.
-- Nel dispositivo ESPHome in HA attiva **"Allow the device to perform Home
-  Assistant actions"**, altrimenti gli stati non arrivano.
-- L'inoltro degli advertising deve essere senza limiti per MAC (i gateway
-  rilanciano frame di molte tapparelle con lo stesso MAC): vedi
-  `finder_relay.h` nella documentazione del nodo.
-- Un ESP32 in posizione centrale può bastare grazie alla mesh; altri ESP32
-  migliorano i comandi verso le tapparelle più isolate (vedi [ROUTING.md](ROUTING.md)).
+**Scenari Finder YOU** — un solo dispositivo con tutte le `scene.*` dell'app
+(eseguite dal gateway via cloud).
+
+**Gateway Finder YOU** — diagnostica della sessione cloud: *Cloud
+reconnections*, *Handshake age*, *Last command age*, *Telemetry age*,
+*Group corrections*.
+
+**Gruppo Finder `<codice>`** — un dispositivo per ogni pulsante/scenario
+appreso (rinominalo, es. "Pulsante sala"):
+- **Correzione automatica** — attiva/disattiva il recupero per il gruppo
+- **Includi `<tapparella>`** — un interruttore per ogni membro
+- **Correzioni**, **Osservazioni** (membri e codici negli attributi)
+- **Dimentica gruppo** — azzera quanto appreso
+
+---
+
+## Le novità di questo fork
+
+### Gateway 1Y.GU.005: sessione cloud stabile
+
+Su questi impianti il cloud Finder non invia lo stato delle tapparelle
+(`subscribe-plant` risponde `10 01 40 03`, `GetPlant` senza posizioni, nessuna
+notifica push) e il gateway **resta legato alla prima sessione cloud**: dopo una
+riconnessione i comandi vengono accettati ma non eseguiti finché il gateway non
+viene riavviato. L'opzione **Sessione cloud stabile** (*Finder YOU →
+Configura*) evita le riconnessioni inutili: niente ri-handshake prima dei
+comandi, i timeout occasionali non chiudono la sessione, lettura ogni 120 s.
+
+### ESP32 e mesh YESLY
+
+- I frame di stato **rilanciati dalla mesh** non sono cifrati e contengono il MAC
+  della tapparella d'origine: vengono decodificati, così **un solo ESP32** riceve
+  lo stato anche delle tapparelle che non sente direttamente.
+- Conferma BLE attesa **2 s** prima di ritentare da un altro ESP32 o passare al
+  cloud; nel log tempo di conferma e strada (diretta/mesh) per ogni comando.
+- Scelta dell'ESP32 **solo in base al segnale** (rimosse le regole scritte per la
+  casa dell'autore originale), più la **mappa personalizzata**
+  `/config/finder_you_mappa_personalizzata.yaml`, generata da sola, per indicare
+  l'ESP32 da provare per primo per ogni tapparella.
+
+### Recupero dei comandi di gruppo
+
+I pulsanti fisici e gli scenari comandano più tapparelle con un unico frame
+cifrato; capita che una tapparella con ricezione debole non lo riceva.
+L'integrazione **impara da sola** quali tapparelle si muovono con ogni gruppo e
+cosa significa ogni codice (apri/chiudi); quando un membro non parte entro
+2,5 s nella direzione giusta gli manda il **comando singolo** (BLE, poi cloud).
+Non interviene mai per codici sconosciuti, se nessun membro si è mosso, se la
+tapparella è già al bersaglio o se nel frattempo arriva un nuovo comando.
+Dettagli in [ROUTING.md](ROUTING.md).
+
+---
+
+## Installazione
+
+1. HACS → ⋮ → **Repository personalizzati** →
+   `https://github.com/l2jalbe/homeassistant-finder-you`, categoria **Integration**
+2. Scarica **Finder YOU** e riavvia Home Assistant
+3. *Impostazioni → Dispositivi e servizi → Aggiungi integrazione → Finder YOU*
+4. Email e password dell'app Finder YOU — l'account deve essere
+   **proprietario** dell'impianto; l'accesso con Google non è supportato (si può
+   aggiungere una password all'account con "password dimenticata")
+5. Gateway 1Y.GU.005: *Finder YOU → Configura* → **Sessione cloud stabile**
+
+**Se i comandi cloud non rispondono (1Y.GU.005):** togli e rimetti
+l'alimentazione al gateway, attendi 3 minuti, *Finder YOU → ⋮ → Ricarica*.
+Evita di tenere aperta l'app Finder YOU: il cloud accetta un solo client attivo.
+
+## ESP32 (consigliato)
+
+Configurazione pronta nella cartella [`esphome/`](esphome/):
+
+- [`finder-ble-1.yaml`](esphome/finder-ble-1.yaml) — nodo ESPHome (ESP32
+  classico `esp32dev`, ESPHome 2026.10+), basato sul componente `finder_yesly`
+  di [BLE_Finder_Yesly](https://github.com/francescodoffizi/BLE_Finder_Yesly)
+- [`finder_relay.h`](esphome/finder_relay.h) — inoltro degli advertising a HA
+  **senza il limite di 1 evento/s per MAC** del componente originale (i gateway
+  rilanciano i frame di molte tapparelle con lo stesso MAC e ne andavano persi)
+  e contatore dei comandi di gruppo
+
+Passi: copia i due file in `/config/esphome/`, aggiungi ai secrets
+`finder_ble_api_key`, `ota_password`, `ap_password` (oltre al Wi-Fi), primo
+caricamento via USB (*Install → Manual download → Factory format*, poi
+web.esphome.io), poi aggiornamenti via Wi-Fi. Nel dispositivo ESPHome in HA
+attiva **"Allow the device to perform Home Assistant actions"**, altrimenti gli
+stati non arrivano. Per un secondo ESP32 copia il file e cambia solo le righe
+`substitutions`.
 
 ## Limiti noti
 
-- Con gateway 1Y.GU.005 il cloud non fornisce gli stati: senza ESP32 HA
-  conosce solo la posizione richiesta dai propri comandi.
+- Con gateway 1Y.GU.005 il cloud non fornisce gli stati: senza ESP32 HA conosce
+  solo le posizioni richieste dai propri comandi.
+- Le tapparelle trasmettono solo quando si muovono: segnale e ricezione si
+  aggiornano con l'uso.
+- Un ripetitore radio dei comandi sull'ESP32 è stato provato e non ha ridotto i
+  comandi persi: il recupero è fatto da HA.
 - Se la sessione cloud cade davvero (rete, riavvio di HA, app aperta) può
-  servire riavviare il gateway.
-- Un solo impianto per account.
+  servire riavviare il gateway. Un solo impianto per account.
 
 ## Documentazione
 
 - [CHANGELOG.md](CHANGELOG.md) — modifiche versione per versione
-- [ROUTING.md](ROUTING.md) — scelta dell'ESP32, mappa personalizzata, formato dei frame BLE
+- [ROUTING.md](ROUTING.md) — scelta dell'ESP32, mappa personalizzata, recupero
+  dei gruppi, formato dei frame BLE
 - [PROTOCOL.md](PROTOCOL.md) — protocollo cloud Finder (dal progetto originale)
 
 ## Crediti
 
 - [7AC/homeassistant-finder-you](https://github.com/7AC/homeassistant-finder-you) — integrazione originale e reverse engineering del cloud
-- [francescodoffizi](https://github.com/francescodoffizi) — fork con BLE locale, luci, scenari e firmware ESP32
+- [francescodoffizi](https://github.com/francescodoffizi) — BLE locale, luci, scenari e firmware ESP32
 - [`hpack`](https://pypi.org/project/hpack/), [`condatek/finderblissha`](https://github.com/condatek/finderblissha)
 
 Licenza MIT. Progetto non ufficiale, non affiliato a Finder S.p.A.; nomi e
