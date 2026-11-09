@@ -13,10 +13,11 @@ CONF_STABLE_SESSION = "stable_cloud_session"
 DEFAULT_SCAN_INTERVAL_SECONDS = 30
 DEFAULT_ENABLE_LOCAL_BLE = True
 # Stable cloud session: never tear down the cloud connection proactively.
+# ON by default in this fork (it targets plants with gateway 1Y.GU.005).
 # Needed on plants (e.g. gateway 1Y.GU.005) whose cloud never pushes
 # shutter telemetry: the integration would otherwise rehandshake before
 # every command, and the gateway only stays bound to the first session.
-DEFAULT_STABLE_SESSION = False
+DEFAULT_STABLE_SESSION = True
 STABLE_SCAN_INTERVAL_SECONDS = 120
 # Consecutive poll timeouts tolerated in stable mode before the client
 # is dropped and the connection rebuilt.

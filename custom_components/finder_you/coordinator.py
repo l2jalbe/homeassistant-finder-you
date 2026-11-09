@@ -47,7 +47,7 @@ from .const import (
 )
 from .group_supervisor import GroupSupervisor
 from .signal_tracker import PUBLISH_INTERVAL as SIGNAL_PUBLISH_INTERVAL, SignalTracker
-from .routing_map import FILE_NAME as ROUTING_MAP_FILE, CustomRoutingMap
+from .preferred_nodes import PreferredNodes
 from .topology import FinderTopologyRouter
 
 
@@ -208,7 +208,7 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         self._consecutive_update_failures: int = 0
         self._topology_router = FinderTopologyRouter(hass, coordinator=self)
         # User-editable "first ESP32 to try" per shutter (see ROUTING.md)
-        self.routing_map = CustomRoutingMap(hass.config.path(ROUTING_MAP_FILE))
+        self.preferred_nodes = PreferredNodes(hass)
         # Learns button/scenario groups and recovers shutters that miss them
         self.group_supervisor = GroupSupervisor(hass, self)
         # Per-shutter BLE reception stats ("Segnale BLE" / "Ricezione" sensors)
@@ -433,18 +433,16 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
         if shutter_durations:
             self._shutter_durations.update(shutter_durations)
 
-        # Keep /config/finder_you_mappa_personalizzata.yaml in sync (create it,
-        # add new shutters, refresh the list of ESP32 nodes, reload edits).
+        # Preferred ESP32 per shutter ("ESP32 preferito" selects): remember the
+        # detected nodes with their names; import the old YAML map once.
         if self._shutters:
-            self._topology_router._discover_registered_nodes()
             try:
-                await self.hass.async_add_executor_job(
-                    self.routing_map.sync,
-                    [(sh.name, sh.uuid) for sh in self._shutters],
-                    list(self._topology_router.esphome_nodes),
+                self.preferred_nodes.remember_nodes(self._topology_router.node_labels())
+                await self.preferred_nodes.async_import_legacy(
+                    [(sh.name, sh.uuid) for sh in self._shutters]
                 )
             except Exception as err:  # noqa: BLE001
-                _LOGGER.warning("Routing map sync failed: %s", err)
+                _LOGGER.warning("Preferred ESP32 update failed: %s", err)
 
         cloud_states = extract_channel_states(plant_payload)
         now = time.time()

@@ -29,7 +29,8 @@ il sistema Finder non offre.
 | Pulsanti e scenari che "perdono" una tapparella | **recupero automatico** dei gruppi appresi |
 | Qualità del segnale per tapparella | sensori **Segnale BLE** e **Ricezione** con storico |
 | Scenari dell'app Finder YOU | entità `scene.*` raccolte in un unico dispositivo |
-| Gateway 1Y.GU.005 | opzione **Sessione cloud stabile** |
+| Gateway 1Y.GU.005 | **Sessione cloud stabile**, attiva di default |
+| ESP32 da usare per ogni tapparella | menu **ESP32 preferito** sul dispositivo |
 
 ---
 
@@ -37,9 +38,14 @@ il sistema Finder non offre.
 
 **Per ogni tapparella** (dispositivo con il nome dell'app Finder YOU)
 - `cover.*` — apri, chiudi, stop, posizione, stato "in apertura/in chiusura"
+- **ESP32 preferito** (configurazione) — *auto* (consigliato: HA sceglie
+  l'ESP32 con il segnale migliore) oppure l'ESP32, con il nome che ha in HA, da
+  provare per primo; se non conferma si passa agli altri ESP32 e poi al cloud.
+  Un ESP32 spento compare come "(non disponibile)": la scelta resta salvata e
+  nel frattempo la tapparella si comporta come *auto*
 - **Segnale BLE** (dBm, diagnostica) — media al minuto del segnale con cui
-  l'ESP32 riceve direttamente la tapparella; nel grafico vedi l'andamento,
-  negli attributi l'ESP32 migliore e il valore per ogni ESP32
+  l'ESP32 migliore riceve direttamente la tapparella; nel grafico vedi
+  l'andamento, negli attributi l'ESP32 migliore e la media di ogni ESP32
 - **Ricezione** (diagnostica) — *Diretta*, *Debole* (diretta ma con media
   sotto −90 dBm: molti frame persi) oppure *Solo via mesh*: il modo più rapido
   per individuare le tapparelle critiche
@@ -71,9 +77,10 @@ Su questi impianti il cloud Finder non invia lo stato delle tapparelle
 (`subscribe-plant` risponde `10 01 40 03`, `GetPlant` senza posizioni, nessuna
 notifica push) e il gateway **resta legato alla prima sessione cloud**: dopo una
 riconnessione i comandi vengono accettati ma non eseguiti finché il gateway non
-viene riavviato. L'opzione **Sessione cloud stabile** (*Finder YOU →
-Configura*) evita le riconnessioni inutili: niente ri-handshake prima dei
+viene riavviato. L'opzione **Sessione cloud stabile**, **attiva di default** in
+questo fork, evita le riconnessioni inutili: niente ri-handshake prima dei
 comandi, i timeout occasionali non chiudono la sessione, lettura ogni 120 s.
+Con un gateway di vecchio tipo si può disattivare da *Finder YOU → Configura*.
 
 ### ESP32 e mesh YESLY
 
@@ -83,9 +90,10 @@ comandi, i timeout occasionali non chiudono la sessione, lettura ogni 120 s.
 - Conferma BLE attesa **2 s** prima di ritentare da un altro ESP32 o passare al
   cloud; nel log tempo di conferma e strada (diretta/mesh) per ogni comando.
 - Scelta dell'ESP32 **solo in base al segnale** (rimosse le regole scritte per la
-  casa dell'autore originale), più la **mappa personalizzata**
-  `/config/finder_you_mappa_personalizzata.yaml`, generata da sola, per indicare
-  l'ESP32 da provare per primo per ogni tapparella.
+  casa dell'autore originale), più il menu **ESP32 preferito** su ogni
+  tapparella per indicare l'ESP32 da provare per primo.
+- Con più ESP32 ognuno viene riconosciuto in modo esatto (nome ESPHome del
+  nodo, es. `finder-ble-2`) e il segnale è misurato separatamente per ciascuno.
 
 ### Recupero dei comandi di gruppo
 
@@ -112,7 +120,8 @@ Dettagli in [ROUTING.md](ROUTING.md).
 4. Email e password dell'app Finder YOU — l'account deve essere
    **proprietario** dell'impianto; l'accesso con Google non è supportato (si può
    aggiungere una password all'account con "password dimenticata")
-5. Gateway 1Y.GU.005: *Finder YOU → Configura* → **Sessione cloud stabile**
+5. La **Sessione cloud stabile** è già attiva (adatta al gateway 1Y.GU.005);
+   con un gateway di vecchio tipo si può disattivare da *Finder YOU → Configura*
 
 **Se i comandi cloud non rispondono (1Y.GU.005):** togli e rimetti
 l'alimentazione al gateway, attendi 3 minuti, *Finder YOU → ⋮ → Ricarica*.
@@ -152,7 +161,7 @@ stati non arrivano. Per un secondo ESP32 copia il file e cambia solo le righe
 ## Documentazione
 
 - [CHANGELOG.md](CHANGELOG.md) — modifiche versione per versione
-- [ROUTING.md](ROUTING.md) — scelta dell'ESP32, mappa personalizzata, recupero
+- [ROUTING.md](ROUTING.md) — scelta dell'ESP32, ESP32 preferito, recupero
   dei gruppi, formato dei frame BLE
 - [PROTOCOL.md](PROTOCOL.md) — protocollo cloud Finder (dal progetto originale)
 

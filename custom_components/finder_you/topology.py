@@ -6,7 +6,6 @@ distributed throughout the home, and routes local commands through the best hop.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -30,8 +29,8 @@ TOPOLOGY_STALE_TIMEOUT = 300.0
 BLE_TX_GUARD_DURATION = 6.0
 
 # Node selection is purely signal-based (see ROUTING.md), optionally
-# overridden per shutter by the user's routing map
-# (/config/finder_you_mappa_personalizzata.yaml, module routing_map.py).
+# overridden per shutter by the user ("ESP32 preferito" select, module
+# preferred_nodes.py; up to v0.3.1 a YAML file in /config).
 # The original author-specific maps (room adjacency, proxy MACs, room
 # keywords) were removed in v0.1.4; they are in git history at bb921a6.
 
@@ -205,59 +204,97 @@ class FinderTopologyRouter:
                         self._esphome_nodes.add(node_name)
                         _LOGGER.info("Discovered compatible ESPHome mesh node: %s", node_name)
 
+    @staticmethod
+    def _norm(value: str | None) -> str:
+        return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+    def _esphome_device_node(self, dev_entry) -> str | None:
+        """Exact node id of an ESPHome device registry entry, if registered.
+
+        1. ``device_name`` stored by the ESPHome config entry (the YAML
+           ``name:``, e.g. "finder-ble-2" -> "finder_ble_2");
+        2. the device name / user name, normalised, equal to a node id.
+        Never a partial or single-word match ("finder" would match every
+        node: fixed in v0.3.2).
+        """
+        for entry_id in dev_entry.config_entries:
+            entry = self.hass.config_entries.async_get_entry(entry_id)
+            if entry is not None and entry.domain == "esphome":
+                node = self._norm(entry.data.get("device_name"))
+                if node in self._esphome_nodes:
+                    return node
+        for name in (dev_entry.name, dev_entry.name_by_user):
+            node = self._norm(name)
+            if node in self._esphome_nodes:
+                return node
+        return None
+
     def _resolve_esphome_node(self, node: str | None, device_id: str | None) -> str | None:
         """Resolve the ESPHome node name from an explicit node name or device_id."""
         if node and node in self._esphome_nodes:
             return node
-
         if not device_id:
             return None
-
-        # Check in-memory cache first
         if not hasattr(self, "_dev_id_to_node"):
-            self._dev_id_to_node: dict[str, str | None] = {}
-
-        if device_id in self._dev_id_to_node:
-            cached = self._dev_id_to_node[device_id]
-            if cached and cached in self._esphome_nodes:
-                return cached
-
-        # Look up device in HA device registry
+            self._dev_id_to_node: dict[str, str] = {}
+        cached = self._dev_id_to_node.get(device_id)
+        if cached and cached in self._esphome_nodes:
+            return cached
         try:
             from homeassistant.helpers import device_registry as dr
-            dev_reg = dr.async_get(self.hass)
-            dev_entry = dev_reg.async_get(device_id)
-            if dev_entry:
-                raw_name = (dev_entry.name or dev_entry.name_by_user or "").lower()
-                area_id = (dev_entry.area_id or "").lower()
-                combined = f"{raw_name}_{area_id}".replace("-", "_").replace(" ", "_")
 
-                matched_node = None
-                if not matched_node:
-                    for registered in self._esphome_nodes:
-                        reg_clean = registered.lower().replace("-", "_")
-                        if reg_clean in combined or any(
-                            tok in combined
-                            for tok in reg_clean.split("_")
-                            if tok not in ("bluetooth", "proxy", "esphome", "web", "esp32")
-                        ):
-                            matched_node = registered
-                            break
-
-                self._dev_id_to_node[device_id] = matched_node
-                if matched_node:
-                    _LOGGER.info(
-                        "Resolved ESPHome device_id '%s' (%s, area=%s) -> node '%s'",
-                        device_id,
-                        dev_entry.name,
-                        dev_entry.area_id,
-                        matched_node,
+            dev_entry = dr.async_get(self.hass).async_get(device_id)
+            if dev_entry is None:
+                return None
+            matched = self._esphome_device_node(dev_entry)
+            if matched:
+                self._dev_id_to_node[device_id] = matched  # failures are not cached
+                _LOGGER.info(
+                    "Resolved ESPHome device '%s' (device_id %s) -> node '%s'",
+                    dev_entry.name_by_user or dev_entry.name,
+                    device_id,
+                    matched,
+                )
+            else:
+                if not hasattr(self, "_unresolved_logged"):
+                    self._unresolved_logged: set[str] = set()
+                if device_id not in self._unresolved_logged:
+                    self._unresolved_logged.add(device_id)
+                    _LOGGER.warning(
+                        "ESPHome device '%s' sends Finder frames but matches no finder_mesh node %s",
+                        dev_entry.name_by_user or dev_entry.name,
+                        sorted(self._esphome_nodes),
                     )
-                return matched_node
-        except Exception as err:
+            return matched
+        except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Failed resolving device_id '%s': %s", device_id, err)
-
         return None
+
+    def node_online(self, node: str) -> bool:
+        """True while the node's finder_mesh service is registered (device connected)."""
+        return self.hass.services.has_service("esphome", f"{node}_finder_mesh_set_percent")
+
+    def online_nodes(self) -> set[str]:
+        """Detected nodes whose finder_mesh services are currently registered."""
+        self._discover_registered_nodes()
+        return {n for n in self._esphome_nodes if self.node_online(n)}
+
+    def node_labels(self) -> dict[str, str]:
+        """node id -> name of the ESPHome device as shown in HA (user rename included)."""
+        from homeassistant.helpers import device_registry as dr
+
+        self._discover_registered_nodes()
+        labels = {n: n for n in self._esphome_nodes}
+        for dev in dr.async_get(self.hass).devices.values():
+            if not any(
+                (e := self.hass.config_entries.async_get_entry(eid)) is not None and e.domain == "esphome"
+                for eid in dev.config_entries
+            ):
+                continue
+            node = self._esphome_device_node(dev)
+            if node:
+                labels[node] = dev.name_by_user or dev.name or node
+        return labels
 
     @callback
     def _resolve_relay_origin(self, byte_list: list[int]) -> str | None:
@@ -417,6 +454,17 @@ class FinderTopologyRouter:
                 if node and repeater_mac is None:
                     self._topology.setdefault(mac_clean, {}).setdefault(node, {})["last_telemetry"] = now
 
+                # Signal statistics BEFORE de-duplication: when two ESP32s hear
+                # the same frame, both RSSI values count (v0.3.2).
+                tracker = getattr(self._coordinator, "signal_tracker", None)
+                if tracker is not None:
+                    if repeater_mac:
+                        changed = tracker.note_relay(matched_dev.uuid, repeater_mac, now)
+                    else:
+                        changed = tracker.note_direct(matched_dev.uuid, node or source_label, rssi, now)
+                    if changed:
+                        self._coordinator.async_update_listeners()
+
                 # Deduplicate identical frames within 200ms across dual listeners
                 # and across direct/relayed copies (byte 0 differs by the 0x40
                 # relay flag, so it is excluded from the key).
@@ -434,14 +482,6 @@ class FinderTopologyRouter:
                     if repeater_mac
                     else f"direct via '{source_label}'"
                 )
-                tracker = getattr(self._coordinator, "signal_tracker", None)
-                if tracker is not None:
-                    if repeater_mac:
-                        changed = tracker.note_relay(matched_dev.uuid, repeater_mac, now)
-                    else:
-                        changed = tracker.note_direct(matched_dev.uuid, node or source_label, rssi, now)
-                    if changed:
-                        self._coordinator.async_update_listeners()
                 fam = (matched_dev.family or "").upper()
                 is_dimmer = any(k in fam for k in ["1521", "1571"])
                 is_shutter = any(k in fam for k in ["13S2", "SHUTTER"])
@@ -501,17 +541,17 @@ class FinderTopologyRouter:
         return set(self._esphome_nodes)
 
     def _user_preferred_node(self, device: BleDirectDevice) -> str | None:
-        """Node forced by the user's routing map for this device, if any."""
-        rmap = getattr(self._coordinator, "routing_map", None) if self._coordinator else None
-        if rmap is None:
+        """Node chosen by the user in the "ESP32 preferito" select, if online."""
+        prefs = getattr(self._coordinator, "preferred_nodes", None) if self._coordinator else None
+        if prefs is None:
             return None
-        return rmap.preferred_node(device.uuid, self._esphome_nodes)
+        return prefs.preferred_node(device.uuid, self.online_nodes())
 
     def select_best_node(self, device: BleDirectDevice, channel: int | None = None) -> str | None:
         """Select the ESPHome node to transmit to the target device.
 
         Order (see ROUTING.md):
-        1. node forced in the user's routing map (if online);
+        1. node chosen in the shutter's "ESP32 preferito" select (if online);
         2. best fresh direct RSSI (< TOPOLOGY_STALE_TIMEOUT);
         3. best historical direct RSSI (stationary wall devices);
         4. node with the best fresh RSSI towards ANY Finder device

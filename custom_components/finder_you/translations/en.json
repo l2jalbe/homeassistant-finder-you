@@ -24,7 +24,7 @@
         "data": {
           "stable_cloud_session": "Stable cloud session"
         },
-        "description": "Keep a single cloud session open: never reconnect before commands and tolerate occasional poll timeouts. Enable it if commands work only right after a gateway restart (e.g. gateway 1Y.GU.005, plants without cloud position telemetry)."
+        "description": "Keep a single cloud session open: never reconnect before commands and tolerate occasional poll timeouts. Enabled by default: required with gateway 1Y.GU.005 (plants without cloud position telemetry). You can disable it with first-generation gateways."
       }
     }
   },

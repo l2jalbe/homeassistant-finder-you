@@ -31,7 +31,7 @@ Questi tempi servono per decidere se ridurre ancora `BLE_SHUTTER_ACK_TIMEOUT`.
 
 ## Ordine di scelta dell'ESP32 (`select_best_node`)
 
-1. **Mappa personalizzata** dell'utente (vedi sotto), se l'ESP32 indicato è online.
+1. **ESP32 preferito** scelto nel menu della tapparella (vedi sotto), se online.
 2. Miglior **RSSI diretto recente** (< 5 min, `TOPOLOGY_STALE_TIMEOUT`).
 3. Miglior **RSSI diretto storico** (tapparelle fisse: il valore resta valido).
 4. ESP32 con la migliore visibilità della mesh (la mesh rilancerà il comando).
@@ -39,44 +39,40 @@ Questi tempi servono per decidere se ridurre ancora `BLE_SHUTTER_ACK_TIMEOUT`.
 
 `select_alternate_node` usa gli stessi criteri 2-5 escludendo il primario.
 
-## Mappa personalizzata: `/config/finder_you_mappa_personalizzata.yaml`
+## ESP32 preferito (menu su ogni tapparella) — `preferred_nodes.py`
 
-Gestita da `routing_map.py`.
+Ogni dispositivo tapparella ha il menu **ESP32 preferito** (sezione
+*Configurazione*):
 
-- Viene **creata da sola** al primo avvio con tutte le tapparelle a `auto` e con
-  un commento iniziale che spiega come compilarla.
-- Si aggiorna da sola quando compaiono nuove tapparelle o cambia l'elenco
-  degli ESP32 rilevati (riga `# ESP32 rilevati: ...`). Contiene solo la sezione
-  `tapparelle:` (la sezione `gruppi:` della v0.2.0 viene rimossa da sola). I valori scritti
-  dall'utente vengono sempre conservati, i commenti aggiunti a mano no.
-- Le modifiche vengono rilette alla lettura periodica (entro ~2 min con la
-  sessione stabile) o subito ricaricando l'integrazione.
-- Valore `auto` = comportamento normale; nome ESP32 (`finder_ble_2` o
-  `finder-ble-2`) = quell'ESP32 viene provato per primo, poi gli altri, poi il cloud.
-- ESP32 sconosciuto/spento → ignorato con un avviso nel log, la tapparella
-  si comporta come `auto`.
-- File con errore di sintassi → non viene mai sovrascritto; restano validi gli
-  ultimi valori letti correttamente.
+- `auto` = comportamento normale (punti 2-5 qui sopra);
+- un ESP32, mostrato con il nome che ha in Home Assistant = quell'ESP32 viene
+  provato per primo, poi gli altri, poi il cloud.
 
-Esempio:
+Dettagli:
 
-```yaml
-tapparelle:
-  "Cucina finestra sx": finder_ble_2
-  "Cucina finestra dx": finder_ble_2
-  "1P Letto3 finestra": finder_ble_3
-  "Lavanderia": auto
-```
+- viene salvato l'**id del nodo ESPHome** (`finder_ble_2`), non il nome: se
+  l'ESP32 viene rinominato in HA la scelta resta valida e il menu mostra il
+  nuovo nome;
+- l'elenco contiene tutti gli ESP32 visti almeno una volta; uno spento compare
+  come `<nome> (non disponibile)`: la scelta resta salvata e nel frattempo la
+  tapparella si comporta come `auto` (avviso nel log una volta sola);
+- le scelte sono salvate in `.storage/finder_you_preferred_nodes` e non vengono
+  toccate dagli aggiornamenti HACS; hanno effetto subito.
 
-### Estendere la mappa
+**Aggiornamento dalla v0.3.1 o precedenti:** il file
+`/config/finder_you_mappa_personalizzata.yaml` non esiste più. Al primo avvio della v0.3.2 i valori diversi da `auto` vengono
+importati nei menu e il file viene rinominato
+`finder_you_mappa_personalizzata.yaml.importato` (si può cancellare).
 
-- **Luci / relè**: `select_best_node()` riceve già il `BleDirectDevice`, quindi
-  basta generare nel file una sezione `luci:` (come `tapparelle:` in
-  `routing_map.py`) e passare anche `coordinator.lights` / `switches` a
-  `routing_map.sync()`.
-- **Ordine completo** (es. "prima esp1, poi esp3"): trasformare il valore in una
-  lista e far restituire a `preferred_node()` il primo online; in
-  `select_alternate_node()` usare il secondo.
+## Riconoscimento degli ESP32
+
+Ogni frame BLE inoltrato a HA porta il dispositivo ESPHome che l'ha ricevuto.
+L'id del nodo si ricava, in quest'ordine, dal nome ESPHome registrato
+(`device_name` della configurazione ESPHome, es. `finder-ble-2`) oppure dal
+nome del dispositivo identico all'id. Non si usano corrispondenze parziali (fino
+alla v0.3.1 bastava una parola in comune, per cui `finder-ble-2` veniva
+scambiato per `finder_ble_1`). Il segnale di ogni tapparella è misurato
+separatamente per ogni ESP32, anche quando due ESP32 ricevono lo stesso frame.
 
 ## Recupero dei comandi di gruppo (pulsanti e scenari) — `group_supervisor.py`
 

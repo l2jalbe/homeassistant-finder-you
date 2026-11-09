@@ -5,9 +5,11 @@ For every device the tracker records:
   per ESP32 node;
 - the time of the last direct frame and of the last mesh-relayed frame.
 
-The "Segnale BLE" sensor publishes the average of the samples collected in
-each PUBLISH_INTERVAL (at most one value per minute per shutter, so the
-recorder is not flooded); "Ricezione" tells whether the shutter is heard
+Samples are averaged PER ESP32 over each PUBLISH_INTERVAL (at most one value
+per minute per shutter, so the recorder is not flooded). The "Segnale BLE"
+sensor shows the average of the ESP32 that hears the shutter best; its
+attributes list the average of every ESP32 (v0.3.2: before, samples of
+different ESP32s were mixed in one average); "Ricezione" tells whether the shutter is heard
 directly ("diretta"), directly but weakly ("debole", average below
 -90 dBm: frames often lost) or only through the mesh ("solo_mesh"). Shutters transmit only when they move,
 so values update when the shutters are used.
@@ -27,12 +29,15 @@ WEAK_RSSI_DBM = -90  # direct, but average below this -> "debole"
 DIRECT_MEMORY_S = 7 * 24 * 3600  # a direct sighting counts as "diretta" for a week
 
 
+_UNNAMED = "?"
+
+
 @dataclass
 class _DeviceSignal:
-    pending: list[int] = field(default_factory=list)
+    pending: dict[str, list[int]] = field(default_factory=dict)
     value: int | None = None
     value_ts: float = 0.0
-    per_node: dict[str, int] = field(default_factory=dict)
+    per_node: dict[str, int] = field(default_factory=dict)  # published averages
     best_node: str | None = None
     last_direct: float | None = None
     last_relay: float | None = None
@@ -53,10 +58,7 @@ class SignalTracker:
         now = time.time() if now is None else now
         d = self._get(uuid)
         d.last_direct = now
-        d.pending.append(int(rssi))
-        if node:
-            d.per_node[node] = int(rssi)
-            d.best_node = max(d.per_node.items(), key=lambda kv: kv[1])[0]
+        d.pending.setdefault(node or _UNNAMED, []).append(int(rssi))
         if d.value is None or now - d.value_ts >= PUBLISH_INTERVAL:
             return self._publish(d, now)
         return False
@@ -83,9 +85,15 @@ class SignalTracker:
     def _publish(d: _DeviceSignal, now: float) -> bool:
         if not d.pending:
             return False
-        d.value = round(sum(d.pending) / len(d.pending))
-        d.value_ts = now
+        for node, samples in d.pending.items():
+            if samples:
+                d.per_node[node] = round(sum(samples) / len(samples))
         d.pending.clear()
+        named = {n: v for n, v in d.per_node.items() if n != _UNNAMED} or d.per_node
+        best = max(named.items(), key=lambda kv: kv[1])
+        d.best_node = None if best[0] == _UNNAMED else best[0]
+        d.value = best[1]
+        d.value_ts = now
         return True
 
     # ---- read side ---------------------------------------------------------
@@ -114,7 +122,7 @@ class SignalTracker:
         fmt = lambda ts: None if ts is None else time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))  # noqa: E731
         return {
             "esp32_migliore": d.best_node,
-            "rssi_per_esp32": dict(d.per_node),
+            "rssi_per_esp32": {n: v for n, v in d.per_node.items() if n != _UNNAMED},
             "ultima_ricezione_diretta": fmt(d.last_direct),
             "ultima_ricezione_via_mesh": fmt(d.last_relay),
             "ripetitore_mesh": d.relay_via,

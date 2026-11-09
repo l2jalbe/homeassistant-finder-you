@@ -294,90 +294,108 @@ async def test_motion_expires(hass):
     assert c.shutter_motion(UUID) is None
 
 
-# --- Routing map (/config/finder_you_mappa_personalizzata.yaml) ---------------
+# --- v0.3.2: preferred ESP32 select (replaces the YAML routing map) ---------
 
-from custom_components.finder_you.routing_map import CustomRoutingMap  # noqa: E402
-
-SHUTTERS = [("Cucina finestra sx ", "b36d8cd3-aaaa"), ("Lavanderia", "31fff8d8-bbbb"), ("1P Bagno ", "f68df89d-cccc")]
+from custom_components.finder_you.preferred_nodes import PreferredNodes  # noqa: E402
 
 
-def test_routing_map_created_with_all_shutters_auto(tmp_path):
-    p = tmp_path / "finder_you_mappa_personalizzata.yaml"
-    m = CustomRoutingMap(str(p))
-    m.sync(SHUTTERS, ["finder_ble_1"])
-    text = p.read_text()
-    assert "COME SI COMPILA" in text
-    assert '"Cucina finestra sx": auto' in text
-    assert '"Lavanderia": auto' in text
-    assert '"1P Bagno": auto' in text
-    assert "# ESP32 rilevati: finder_ble_1" in text
-    assert m.preferred_node("b36d8cd3-aaaa", {"finder_ble_1"}) is None
-
-
-def test_routing_map_user_value_used_and_preserved(tmp_path):
-    p = tmp_path / "m.yaml"
-    m = CustomRoutingMap(str(p))
-    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
-    p.write_text(p.read_text().replace('"Cucina finestra sx": auto', '"Cucina finestra sx": finder-ble-2'))
-    import os, time as _t
-    os.utime(p, (_t.time() + 5, _t.time() + 5))
-    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
-    assert m.preferred_node("b36d8cd3-aaaa", {"finder_ble_1", "finder_ble_2"}) == "finder_ble_2"
-    assert m.preferred_node("31fff8d8-bbbb", {"finder_ble_1", "finder_ble_2"}) is None
-    # new shutter + new node -> file rewritten, user value kept
-    m.sync(SHUTTERS + [("Sala finestra dx", "72a6279a-dddd")], ["finder_ble_1", "finder_ble_2", "finder_ble_3"])
-    text = p.read_text()
-    assert '"Cucina finestra sx": finder-ble-2' in text
-    assert '"Sala finestra dx": auto' in text
-    assert "finder_ble_3" in text
-
-
-def test_routing_map_offline_or_unknown_node_falls_back_to_auto(tmp_path):
-    p = tmp_path / "m.yaml"
-    m = CustomRoutingMap(str(p))
-    m.sync(SHUTTERS, ["finder_ble_1"])
-    p.write_text(p.read_text().replace('"Lavanderia": auto', '"Lavanderia": esp_inesistente'))
-    import os, time as _t
-    os.utime(p, (_t.time() + 5, _t.time() + 5))
-    m.sync(SHUTTERS, ["finder_ble_1"])
-    assert m.preferred_node("31fff8d8-bbbb", {"finder_ble_1"}) is None
-
-
-def test_routing_map_syntax_error_keeps_previous_values(tmp_path):
-    p = tmp_path / "m.yaml"
-    m = CustomRoutingMap(str(p))
-    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
-    p.write_text(p.read_text().replace('"Lavanderia": auto', '"Lavanderia": finder_ble_2'))
-    import os, time as _t
-    os.utime(p, (_t.time() + 5, _t.time() + 5))
-    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
-    broken = 'tapparelle:\n  "Lavanderia": [unclosed\n'
-    p.write_text(broken)
-    os.utime(p, (_t.time() + 10, _t.time() + 10))
-    m.sync(SHUTTERS, ["finder_ble_1", "finder_ble_2"])
-    assert p.read_text() == broken  # never overwrite a file being edited
-    assert m.preferred_node("31fff8d8-bbbb", {"finder_ble_1", "finder_ble_2"}) == "finder_ble_2"
-
-
-async def test_select_best_node_uses_routing_map_then_rssi(hass, tmp_path):
+async def test_preferred_node_then_rssi(hass):
     c, r = _router_with_shutter(hass)
     r._esphome_nodes = {"finder_ble_1", "finder_ble_2"}
     r._discover_registered_nodes = lambda: None
+    online = {"finder_ble_1", "finder_ble_2"}
+    r.node_online = lambda n: n in online
     dev = c._ble_inventory[UUID]
     now = time.time()
     r._topology[DIRECT] = {
         "finder_ble_1": {"rssi": -65, "last_seen": now},
         "finder_ble_2": {"rssi": -80, "last_seen": now},
     }
-    c.routing_map = CustomRoutingMap(str(tmp_path / "m.yaml"))
-    c.routing_map.sync([("Cucina finestra sx", UUID)], ["finder_ble_1", "finder_ble_2"])
     assert r.select_best_node(dev) == "finder_ble_1"  # auto -> best RSSI
     assert r.select_alternate_node(dev, exclude_node="finder_ble_1") == "finder_ble_2"
-    c.routing_map._by_name["Cucina finestra sx"] = "finder_ble_2"
+    c.preferred_nodes.set(UUID, "finder_ble_2")
     assert r.select_best_node(dev) == "finder_ble_2"  # forced
     assert r.select_alternate_node(dev, exclude_node="finder_ble_2") == "finder_ble_1"
-    r._esphome_nodes = {"finder_ble_1"}  # forced node offline -> auto
+    online.discard("finder_ble_2")  # forced node offline -> auto, choice kept
     assert r.select_best_node(dev) == "finder_ble_1"
+    assert c.preferred_nodes.get(UUID) == "finder_ble_2"
+
+
+async def test_legacy_yaml_imported_once_and_renamed(hass, tmp_path):
+    hass.config.config_dir = str(tmp_path)
+    old = tmp_path / "finder_you_mappa_personalizzata.yaml"
+    old.write_text(
+        'tapparelle:\n  "Cucina finestra sx": finder-ble-2   # uuid b36d8cd3\n'
+        '  "Lavanderia": auto\n  "1P Bagno": esp_sconosciuto\n'
+    )
+    p = PreferredNodes(hass)
+    await p.async_load()
+    shutters = [("Cucina finestra sx ", "b36d-a"), ("Lavanderia", "31ff-b"), ("1P Bagno", "f68d-c")]
+    await p.async_import_legacy(shutters)
+    assert p.get("b36d-a") == "finder_ble_2"
+    assert p.get("31ff-b") is None
+    assert p.get("f68d-c") == "esp_sconosciuto"  # kept; offline/unknown behaves as auto
+    assert p.preferred_node("f68d-c", {"finder_ble_1"}) is None
+    assert not old.exists()
+    assert (tmp_path / "finder_you_mappa_personalizzata.yaml.importato").exists()
+    # never recreated / re-imported
+    p.set("b36d-a", None)
+    await p.async_import_legacy(shutters)
+    assert p.get("b36d-a") is None
+    assert not old.exists()
+
+
+async def test_preferred_select_options(hass):
+    from custom_components.finder_you.select import PreferredNodeSelect
+
+    c, r = _router_with_shutter(hass)
+    c._topology_router = r
+    online = {"finder_ble_1"}
+    r._esphome_nodes = {"finder_ble_1", "finder_ble_2"}
+    r._discover_registered_nodes = lambda: None
+    r.node_online = lambda n: n in online
+    c.preferred_nodes.remember_nodes({"finder_ble_1": "Finder BLE 1", "finder_ble_2": "Finder BLE Lavanderia"})
+    sel = PreferredNodeSelect(c, _shutter(UUID, "Cucina finestra sx"))
+    sel.hass = hass
+    sel.async_write_ha_state = lambda: None
+    assert sel.options == ["auto", "Finder BLE 1", "Finder BLE Lavanderia (non disponibile)"]
+    assert sel.current_option == "auto"
+    await sel.async_select_option("Finder BLE Lavanderia (non disponibile)")
+    assert c.preferred_nodes.get(UUID) == "finder_ble_2"  # node id stored, not the name
+    online.add("finder_ble_2")
+    assert sel.current_option == "Finder BLE Lavanderia"
+    c.preferred_nodes.remember_nodes({"finder_ble_2": "ESP Lavanderia"})  # renamed in HA
+    assert sel.current_option == "ESP Lavanderia"
+    await sel.async_select_option("auto")
+    assert c.preferred_nodes.get(UUID) is None
+
+
+async def test_esphome_node_resolution_is_exact(hass):
+    from homeassistant.helpers import device_registry as dr
+
+    _, r = _router_with_shutter(hass)
+    r._esphome_nodes = {"finder_ble_1", "finder_ble_2"}
+    reg = dr.async_get(hass)
+
+    def esphome_dev(device_name, name, mac):
+        e = MockConfigEntry(domain="esphome", data={"device_name": device_name})
+        e.add_to_hass(hass)
+        return reg.async_get_or_create(
+            config_entry_id=e.entry_id, connections={(dr.CONNECTION_NETWORK_MAC, mac)}, name=name
+        )
+
+    d1 = esphome_dev("finder-ble-1", "Finder BLE 1", "aa:00:00:00:00:01")
+    d2 = esphome_dev("finder-ble-2", "Finder BLE 2", "aa:00:00:00:00:02")
+    proxy = esphome_dev("bluetooth-proxy-finder", "Finder proxy", "aa:00:00:00:00:03")
+    assert r._resolve_esphome_node(None, d1.id) == "finder_ble_1"
+    assert r._resolve_esphome_node(None, d2.id) == "finder_ble_2"  # was finder_ble_1 up to v0.3.1
+    assert r._resolve_esphome_node(None, proxy.id) is None  # no single-word match
+    # renamed by the user: still resolved through the ESPHome device_name
+    reg.async_update_device(d2.id, name_by_user="Lavanderia ESP")
+    r._dev_id_to_node.clear()
+    assert r._resolve_esphome_node(None, d2.id) == "finder_ble_2"
+    r._discover_registered_nodes = lambda: None
+    assert r.node_labels() == {"finder_ble_1": "Finder BLE 1", "finder_ble_2": "Lavanderia ESP"}
 
 
 async def test_no_author_specific_rules_left(hass):
@@ -425,7 +443,6 @@ def _sup_coord(hass, tmp_path):
     c._shutters = [_shutter(SALA_DX, "Sala finestra dx"), _shutter(SALA_SX, "Sala finestra sx"),
                    _shutter(INGRESSO, "Portafinestra ingresso")]
     c.data = {SALA_DX: 100, SALA_SX: 100, INGRESSO: 100}
-    c.routing_map = CustomRoutingMap(str(tmp_path / "m.yaml"))
     c.async_set_position = AsyncMock()
     return c, c.group_supervisor
 
@@ -540,16 +557,6 @@ async def test_ha_commanded_shutter_not_learned_nor_corrected(hass, tmp_path):
     assert SALA_SX not in sup._groups["0B0000"]["members"]
 
 
-def test_routing_map_has_no_groups_and_drops_legacy_section(tmp_path):
-    p = tmp_path / "m.yaml"
-    p.write_text('tapparelle:\n  "Lavanderia": finder_ble_1\n\ngruppi:\n  "0B0000":\n    correzione: si\n')
-    m = CustomRoutingMap(str(p))
-    m.sync(SHUTTERS, ["finder_ble_1"])
-    text = p.read_text()
-    assert "\ngruppi:" not in text
-    assert '"Lavanderia": finder_ble_1' in text
-
-
 async def test_topology_forwards_command_frames(hass, tmp_path):
     c, r = _router_with_shutter(hass)
     c.group_supervisor.handle_command_frame = MagicMock()
@@ -608,7 +615,30 @@ def test_signal_tracker_average_and_reception():
     assert t.flush(now=1062) is True
     assert t.rssi("u") == -85
     attrs = t.attributes("u")
-    assert attrs["esp32_migliore"] == "finder_ble_1" and attrs["rssi_per_esp32"] == {"finder_ble_1": -90}
+    assert attrs["esp32_migliore"] == "finder_ble_1" and attrs["rssi_per_esp32"] == {"finder_ble_1": -85}
+
+
+def test_signal_tracker_per_esp32_averages():
+    t = SignalTracker()
+    t.note_direct("u", "finder_ble_1", -92, now=1000)
+    t.note_direct("u", "finder_ble_2", -60, now=1001)
+    t.note_direct("u", "finder_ble_1", -96, now=1002)
+    t.note_direct("u", "finder_ble_2", -64, now=1003)
+    t.flush(now=1070)
+    assert t.rssi("u") == -62  # best ESP32, not the mix of both (-78)
+    attrs = t.attributes("u")
+    assert attrs["esp32_migliore"] == "finder_ble_2"
+    assert attrs["rssi_per_esp32"] == {"finder_ble_1": -96, "finder_ble_2": -62}  # -92 was published at once
+    assert t.reception("u", now=1070) == "diretta"
+
+
+async def test_both_esp32_counted_despite_dedup(hass):
+    c, r = _router_with_shutter(hass)
+    r._process_finder_adv_bytes(DIRECT, -93, _hx(F_STOP100), "finder_ble_1", "finder_ble_1")
+    r._process_finder_adv_bytes(DIRECT, -61, _hx(F_STOP100), "finder_ble_2", "finder_ble_2")
+    c.signal_tracker.flush(now=time.time() + 120)
+    assert c.signal_tracker.attributes(UUID)["rssi_per_esp32"] == {"finder_ble_1": -93, "finder_ble_2": -61}
+    assert c.signal_tracker.rssi(UUID) == -61
 
 
 async def test_topology_feeds_signal_tracker(hass):

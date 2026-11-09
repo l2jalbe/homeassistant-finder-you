@@ -2,6 +2,20 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.3.2] - 2026-11-09
+
+### Aggiunto
+- Menu **ESP32 preferito** su ogni tapparella (*auto* o l'ESP32, con il nome che ha in HA, da provare per primo). Un ESP32 spento compare come "(non disponibile)": la scelta resta salvata e la tapparella si comporta come *auto*. Scelte salvate in `.storage/finder_you_preferred_nodes`.
+
+### Modificato
+- **Sessione cloud stabile attiva di default** (il fork è pensato per il gateway 1Y.GU.005); si può disattivare da *Configura*. Chi l'aveva già impostata da *Configura* mantiene la propria scelta.
+- Il file `/config/finder_you_mappa_personalizzata.yaml` non viene più creato: al primo avvio i suoi valori vengono importati nei menu *ESP32 preferito* e il file rinominato `.importato`.
+- **Segnale BLE**: media calcolata separatamente per ogni ESP32; il sensore mostra l'ESP32 migliore, gli attributi la media di ciascuno.
+
+### Corretto
+- Con più ESP32 i frame ricevuti da `finder-ble-2` venivano attribuiti a `finder_ble_1` (bastava la parola "finder" in comune): ora il nodo si riconosce dal nome ESPHome esatto. Di conseguenza la scelta dell'ESP32 per i comandi non teneva conto del secondo nodo.
+- Quando due ESP32 ricevevano lo stesso frame, il segnale del secondo veniva scartato insieme al doppione.
+
 ## [0.3.1] - 2026-11-08
 
 ### Aggiunto
