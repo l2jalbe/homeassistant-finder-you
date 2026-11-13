@@ -401,8 +401,9 @@ class FinderYouCoordinator(DataUpdateCoordinator[dict]):
             # for up to 5 consecutive failures (~75s) to avoid UI entities flickering unavailable.
             if self.data and self._consecutive_update_failures <= 5:
                 _LOGGER.warning(
-                    "Cloud poll failed (%s) [%d/5]; falling back to cached telemetry",
-                    err,
+                    "Cloud poll failed (%s: %s) [%d/5]; falling back to cached telemetry",
+                    type(err).__name__,
+                    str(err) or "no details",
                     self._consecutive_update_failures,
                 )
                 return self.data

@@ -2,6 +2,15 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.3.3] - 2026-11-13
+
+### Corretto
+- **Thread-safety**: `_handle_ble_adv_event` (eventi `esphome.finder_ble_adv`) non era marcato `@callback`, quindi Home Assistant lo eseguiva in un thread dell'executor invece che nell'event loop. Da lì partivano `async_update_listeners()`, `async_set_updated_data()` e `async_write_ha_state()` fuori dal loop: con le versioni recenti di HA ogni aggiornamento generava un `RuntimeError` ("calls async_write_ha_state from a thread other than the event loop", migliaia di occorrenze) e lo stato delle entità (posizione, in apertura/chiusura, segnale, ricezione) si aggiornava a intermittenza.
+- Rimosso l'uso di `DeviceEntry.config_entries` (deprecato, non funzionerà più da HA 2027.10): si usa `config_entry_id`, con ripiego per i core più vecchi.
+
+### Modificato
+- Il messaggio "Cloud poll failed" riporta ora anche il tipo di eccezione (es. `TimeoutError`) e non più solo il testo, spesso vuoto.
+
 ## [0.3.2] - 2026-11-09
 
 ### Aggiunto

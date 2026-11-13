@@ -217,7 +217,15 @@ class FinderTopologyRouter:
         Never a partial or single-word match ("finder" would match every
         node: fixed in v0.3.2).
         """
-        for entry_id in dev_entry.config_entries:
+        # A device belongs to a single config entry; ``config_entries`` is
+        # deprecated (removed in HA 2027.10). Older cores only have the set.
+        if hasattr(dev_entry, "config_entry_id"):
+            entry_ids = (dev_entry.config_entry_id,)
+        else:
+            entry_ids = tuple(dev_entry.config_entries)
+        for entry_id in entry_ids:
+            if entry_id is None:
+                continue
             entry = self.hass.config_entries.async_get_entry(entry_id)
             if entry is not None and entry.domain == "esphome":
                 node = self._norm(entry.data.get("device_name"))
@@ -319,6 +327,7 @@ class FinderTopologyRouter:
                 return ":".join(parts)
         return None
 
+    @callback
     def _handle_ble_adv_event(self, event: Event) -> None:
         """Process incoming BLE advertisement observation from an ESPHome node."""
         data = event.data
