@@ -293,15 +293,12 @@ class FinderTopologyRouter:
 
         self._discover_registered_nodes()
         labels = {n: n for n in self._esphome_nodes}
-        for dev in dr.async_get(self.hass).devices.values():
-            if not any(
-                (e := self.hass.config_entries.async_get_entry(eid)) is not None and e.domain == "esphome"
-                for eid in dev.config_entries
-            ):
-                continue
-            node = self._esphome_device_node(dev)
-            if node:
-                labels[node] = dev.name_by_user or dev.name or node
+        registry = dr.async_get(self.hass)
+        for entry in self.hass.config_entries.async_entries("esphome"):
+            for dev in dr.async_entries_for_config_entry(registry, entry.entry_id):
+                node = self._esphome_device_node(dev)
+                if node:
+                    labels[node] = dev.name_by_user or dev.name or node
         return labels
 
     @callback

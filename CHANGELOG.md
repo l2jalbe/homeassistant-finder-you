@@ -2,6 +2,11 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.3.4] - 2026-11-13
+
+### Corretto
+- Nomi degli ESP32 nel menu *ESP32 preferito*: rimossi gli ultimi usi di API deprecate (`device_registry.devices` come mappa, non più valido da HA 2027.9, e `DeviceEntry.config_entries`, da HA 2027.10). Ora si leggono solo i dispositivi delle integrazioni ESPHome con `async_entries_for_config_entry`.
+
 ## [0.3.3] - 2026-11-13
 
 ### Corretto
