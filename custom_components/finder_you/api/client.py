@@ -12,10 +12,12 @@ to be accepted as the "live" client by the gateway router.
 from __future__ import annotations
 
 import asyncio
+import gzip
 import logging
 import ssl
 import struct
 import uuid
+import zlib
 
 import hpack
 
@@ -56,6 +58,38 @@ class FinderApiError(Exception):
         self.method = method
         self.status = status
         self.code = code
+
+
+class FinderCloudError(FinderApiError):
+    """The cloud answered with something that is not a valid gRPC reply:
+    an HTTP error page (e.g. 503 from the load balancer), a body that cannot
+    be decompressed or a payload that is not protobuf. Subclass of
+    FinderApiError so the coordinator treats it as a normal cloud failure
+    (cached telemetry, no traceback)."""
+
+    def __init__(self, detail: str, method: str = "?") -> None:
+        Exception.__init__(self, f"{method}: {detail}")
+        self.detail = detail
+        self.method = method
+        self.status = -1
+        self.code = None
+
+
+def _decompress(data: bytes, encoding: str | None) -> bytes:
+    """Decompress a gRPC message flagged as compressed (gzip or deflate)."""
+    enc = (encoding or "").lower()
+    if enc == "gzip":
+        return gzip.decompress(data)
+    if enc == "deflate":
+        try:
+            return zlib.decompress(data)
+        except zlib.error:
+            return zlib.decompress(data, -zlib.MAX_WBITS)
+    # Encoding header missing or unknown: try the usual formats.
+    try:
+        return gzip.decompress(data)
+    except (OSError, EOFError):
+        return zlib.decompress(data)
 
 
 class GatewayOfflineError(Exception):
@@ -173,6 +207,8 @@ class FinderHomeClient:
         # Per-stream buffers for DATA frames and trailers state.
         data_bufs: dict[int, bytearray] = {}
         statuses: dict[int, int] = {}
+        http_statuses: dict[int, int] = {}
+        encodings: dict[int, str] = {}
         try:
             while True:
                 try:
@@ -189,13 +225,25 @@ class FinderHomeClient:
                         if len(body) >= 5:
                             msg_len = int.from_bytes(body[1:5], "big")
                             msg = body[5 : 5 + msg_len]
+                            if body[0] == 1:
+                                try:
+                                    msg = _decompress(msg, encodings.get(sid))
+                                except Exception as err:  # noqa: BLE001
+                                    _LOGGER.warning("cannot decompress notification: %s", err)
+                                    continue
                             self._notification_queue.put_nowait(msg)
                             self._dispatch_shutter_event(msg)
                     else:
                         buf = data_bufs.setdefault(sid, bytearray())
                         buf.extend(body)
                         if flags & FLAG_END_STREAM:
-                            self._finalize_stream(sid, bytes(buf), statuses.get(sid, 0))
+                            self._finalize_stream(
+                                sid,
+                                bytes(buf),
+                                statuses.get(sid, 0),
+                                http_status=http_statuses.pop(sid, None),
+                                encoding=encodings.pop(sid, None),
+                            )
                             data_bufs.pop(sid, None)
                             statuses.pop(sid, None)
                 elif ftype == TYPE_HEADERS:
@@ -207,11 +255,21 @@ class FinderHomeClient:
                                 v = v.decode()
                             if k == "grpc-status":
                                 statuses[sid] = int(v)
+                            elif k == ":status":
+                                http_statuses[sid] = int(v)
+                            elif k == "grpc-encoding":
+                                encodings[sid] = v
                     except Exception:
                         _LOGGER.exception("decode trailers")
                     if flags & FLAG_END_STREAM:
                         buf = data_bufs.pop(sid, bytearray())
-                        self._finalize_stream(sid, bytes(buf), statuses.pop(sid, 0))
+                        self._finalize_stream(
+                            sid,
+                            bytes(buf),
+                            statuses.pop(sid, 0),
+                            http_status=http_statuses.pop(sid, None),
+                            encoding=encodings.pop(sid, None),
+                        )
                 elif ftype == TYPE_PING and not (flags & FLAG_ACK):
                     # Echo back as ACK
                     assert self._writer is not None
@@ -227,12 +285,32 @@ class FinderHomeClient:
                     fut.set_exception(ConnectionError("h2 connection closed"))
             self._pending.clear()
 
-    def _finalize_stream(self, sid: int, body: bytes, status: int) -> None:
+    def _finalize_stream(
+        self,
+        sid: int,
+        body: bytes,
+        status: int,
+        http_status: int | None = None,
+        encoding: str | None = None,
+    ) -> None:
         fut = self._pending.pop(sid, None)
-        if fut is not None and not fut.done():
-            # Strip the 5-byte gRPC framing prefix from the body
-            payload = body[5:] if len(body) >= 5 else b""
-            fut.set_result((payload, status))
+        if fut is None or fut.done():
+            return
+        if http_status is not None and http_status != 200:
+            # Not a gRPC reply: an HTTP error page (e.g. "no healthy upstream")
+            text = body[:80].decode("utf-8", errors="replace").strip()
+            detail = f"HTTP {http_status}" + (f": {text}" if text else "")
+            fut.set_exception(FinderCloudError(detail))
+            return
+        # Strip the 5-byte gRPC framing prefix from the body
+        payload = body[5:] if len(body) >= 5 else b""
+        if len(body) >= 5 and body[0] == 1:
+            try:
+                payload = _decompress(payload, encoding)
+            except Exception as err:  # noqa: BLE001
+                fut.set_exception(FinderCloudError(f"cannot decompress reply ({encoding}): {err}"))
+                return
+        fut.set_result((payload, status))
 
     def _dispatch_shutter_event(self, msg: bytes) -> None:
         """Scan a notification for UUIDs and wake any waiter for that shutter.
@@ -330,12 +408,20 @@ class FinderHomeClient:
             self._build_headers_frame(method, sid, with_auth) + self._build_data_frame(body, sid)
         )
         await self._writer.drain()
-        payload, status = await asyncio.wait_for(fut, timeout=15)
+        try:
+            payload, status = await asyncio.wait_for(fut, timeout=15)
+        except FinderCloudError as err:
+            raise FinderCloudError(err.detail, method) from None
         if status != 0:
             raise FinderApiError(method, status)
         # The application also encodes a status in field 1 of every response.
         # 0x08 0x01 (varint 1) = OK, 0x08 0x02 = error follows.
-        fields = parse_fields(payload)
+        try:
+            fields = parse_fields(payload)
+        except (ValueError, IndexError) as err:
+            raise FinderCloudError(
+                f"unreadable reply ({err}; first bytes {payload[:16].hex()})", method
+            ) from err
         if fields.get(1, [0])[0] == 2:
             code = fields.get(2, [0])[0]
             raise FinderApiError(method, 2, code)

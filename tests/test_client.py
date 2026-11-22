@@ -925,3 +925,51 @@ async def test_handshake_swallows_subscription_timeouts(caplog):
     ):
         await c.handshake()
     # We just need this to complete without raising — the timeouts are logged.
+
+
+# ---------------------------------------------------------------------------
+# v0.3.5: non-gRPC replies (HTTP error pages, compressed or garbage bodies)
+
+
+async def _call_with_reply(body: bytes, http_status=None, encoding=None):
+    c = _client()
+    c._writer = AsyncMock()
+    c._writer.write = MagicMock()
+    c._next_stream_id = 7
+
+    async def fake_drain():
+        c._finalize_stream(7, body, 0, http_status=http_status, encoding=encoding)
+
+    c._writer.drain.side_effect = fake_drain
+    return await c._call("GetPlant", b"body", with_auth=False)
+
+
+async def test_call_http_error_page_raises_cloud_error():
+    from custom_components.finder_you.api.client import FinderCloudError
+
+    with pytest.raises(FinderCloudError) as exc:
+        await _call_with_reply(b"no healthy upstream", http_status=503)
+    assert isinstance(exc.value, FinderApiError)
+    assert "GetPlant: HTTP 503: no healthy upstream" in str(exc.value)
+
+
+async def test_call_unreadable_payload_raises_cloud_error():
+    from custom_components.finder_you.api.client import FinderCloudError
+
+    garbage = b"no healthy upstream"
+    body = bytes([0]) + struct.pack(">L", len(garbage)) + garbage
+    with pytest.raises(FinderCloudError) as exc:
+        await _call_with_reply(body)
+    assert "unreadable reply" in str(exc.value)
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", None])
+async def test_call_decompresses_compressed_reply(encoding):
+    import gzip
+    import zlib
+
+    payload = field_varint(1, 1) + field_string(2, b"data")
+    packed = zlib.compress(payload) if encoding == "deflate" else gzip.compress(payload)
+    body = bytes([1]) + struct.pack(">L", len(packed)) + packed
+    out = await _call_with_reply(body, encoding=encoding)
+    assert parse_fields(out)[2] == [b"data"]

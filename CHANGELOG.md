@@ -2,6 +2,12 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.3.5] - 2026-11-22
+
+### Corretto
+- **Risposte anomale del cloud gestite come guasto del cloud**: quando il server Finder rispondeva con una pagina di errore HTTP (es. 503) o con dati illeggibili, l'integrazione provava a decodificarli come protobuf e falliva con `ValueError: unsupported wire type`, mostrato come "Unexpected error" con traceback. Ora l'errore diventa `FinderCloudError` (es. `GetPlant: HTTP 503: no healthy upstream`), il coordinator usa i dati in cache come per gli altri guasti del cloud e nel log resta una sola riga "Cloud poll failed".
+- Risposte gRPC compresse (gzip/deflate): ora vengono decompresse. L'integrazione dichiarava di accettarle ma non le decomprimeva.
+
 ## [0.3.4] - 2026-11-13
 
 ### Corretto
