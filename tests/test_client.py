@@ -973,3 +973,17 @@ async def test_call_decompresses_compressed_reply(encoding):
     body = bytes([1]) + struct.pack(">L", len(packed)) + packed
     out = await _call_with_reply(body, encoding=encoding)
     assert parse_fields(out)[2] == [b"data"]
+
+
+async def test_call_accepts_valid_grpc_reply_with_http_401():
+    # v0.3.6 regression: CheckUser (sent without auth) gets HTTP 401 with a
+    # normal gRPC body; it must be accepted as in v0.3.4.
+    payload = field_varint(1, 1) + field_string(2, b"data")
+    body = bytes([0]) + struct.pack(">L", len(payload)) + payload
+    out = await _call_with_reply(body, http_status=401)
+    assert parse_fields(out)[2] == [b"data"]
+
+
+async def test_call_accepts_empty_body_with_http_401():
+    out = await _call_with_reply(b"", http_status=401)
+    assert out == b""

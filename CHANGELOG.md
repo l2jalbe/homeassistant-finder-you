@@ -2,6 +2,11 @@
 
 Tutte le modifiche degne di nota a questa integrazione personalizzata per Home Assistant sono documentate in questo file.
 
+## [0.3.6] - 2026-11-24
+
+### Corretto
+- **L'integrazione non si avviava con la 0.3.5** (`CheckUser: HTTP 401`, setup in retry): il server Finder risponde alla chiamata iniziale `CheckUser`, inviata senza credenziali come fa l'app Android, con HTTP 401 ma con una risposta gRPC valida. La 0.3.5 trattava ogni codice HTTP diverso da 200 come errore. Ora il codice HTTP conta solo se la risposta non è gRPC (pagina di errore in testo, es. "no healthy upstream"); altrimenti si procede come nella 0.3.4.
+
 ## [0.3.5] - 2026-11-22
 
 ### Corretto

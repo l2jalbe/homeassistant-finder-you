@@ -75,6 +75,16 @@ class FinderCloudError(FinderApiError):
         self.code = None
 
 
+def _is_grpc_framed(body: bytes) -> bool:
+    """True if body is one or more well-formed gRPC length-prefixed messages."""
+    pos = 0
+    while pos < len(body):
+        if len(body) - pos < 5 or body[pos] not in (0, 1):
+            return False
+        pos += 5 + int.from_bytes(body[pos + 1 : pos + 5], "big")
+    return pos == len(body)
+
+
 def _decompress(data: bytes, encoding: str | None) -> bytes:
     """Decompress a gRPC message flagged as compressed (gzip or deflate)."""
     enc = (encoding or "").lower()
@@ -296,8 +306,11 @@ class FinderHomeClient:
         fut = self._pending.pop(sid, None)
         if fut is None or fut.done():
             return
-        if http_status is not None and http_status != 200:
-            # Not a gRPC reply: an HTTP error page (e.g. "no healthy upstream")
+        if http_status is not None and http_status != 200 and body and not _is_grpc_framed(body):
+            # Not a gRPC reply: an HTTP error page (e.g. "no healthy upstream").
+            # A non-200 status with a valid gRPC body is accepted as before:
+            # the server answers the unauthenticated CheckUser with HTTP 401
+            # plus a normal gRPC reply, and the Android app ignores the 401.
             text = body[:80].decode("utf-8", errors="replace").strip()
             detail = f"HTTP {http_status}" + (f": {text}" if text else "")
             fut.set_exception(FinderCloudError(detail))
